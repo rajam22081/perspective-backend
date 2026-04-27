@@ -25,3 +25,9 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: supabase functions deploy perspective-chat-v3 --project-ref "${{ secrets.SUPABASE_PROJECT_ID }}"
+
+      - name: Deploy sable-read-chunk
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy sable-read-chunk --project-ref "${{ secrets.SUPABASE_PROJECT_ID }}" --no-verify-jwt
+        
