@@ -580,4 +580,103 @@ async function applyDerivableNew(
       mechanism_id: mechanismId,
       source_id: sourceId,
       locator,
-     
+     source_framing: triage.source_framing || null,
+    },
+    { onConflict: "mechanism_id,source_id" }
+  );
+
+  return {
+    claim: claim.statement,
+    outcome: "derivable_new",
+    mechanism_id: mechanismId,
+    mechanism_name: m.name,
+    reasoning: triage.reasoning,
+  };
+}
+
+async function applyPending(
+  triage: any,
+  claim: any,
+  sourceId: string,
+  locator: string
+) {
+  const { data, error } = await supabase
+    .from("pending_questions")
+    .insert({
+      claim: claim.statement,
+      source_id: sourceId,
+      source_locator: locator,
+      source_excerpt: claim.source_excerpt || null,
+      obstruction: triage.obstruction || null,
+      status: "open",
+    })
+    .select()
+    .single();
+
+  if (error) {
+    return {
+      claim: claim.statement,
+      outcome: "pending_insert_error",
+      error: error.message,
+    };
+  }
+
+  return {
+    claim: claim.statement,
+    outcome: "pending",
+    pending_question_id: data.id,
+    obstruction: triage.obstruction,
+  };
+}
+
+// =====================================================
+// CLAUDE API CALL
+// =====================================================
+
+async function callClaude(systemPrompt: string, userMessage: string, maxTokens: number) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    return { ok: false, error: `Claude API ${response.status}: ${errText}` };
+  }
+
+  const data = await response.json();
+  const text = data?.content?.[0]?.text;
+  if (!text) return { ok: false, error: "Empty Claude response" };
+  return { ok: true, text };
+}
+
+// =====================================================
+// HELPERS
+// =====================================================
+
+function stripCodeFences(text: string) {
+  return text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+}
+
+function jsonResponse(data: any) {
+  return new Response(JSON.stringify(data), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function errorResponse(step: string, error: string) {
+  return new Response(JSON.stringify({ success: false, step, error }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    status: 500,
+  });
+}
