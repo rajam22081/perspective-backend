@@ -581,7 +581,7 @@ async function applyDerivableNew(
       source_id: sourceId,
       locator,
      source_framing: triage.source_framing || null,
-    },
+    }
     { onConflict: "mechanism_id,source_id" }
   );
 
