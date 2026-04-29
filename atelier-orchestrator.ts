@@ -130,21 +130,60 @@ async function main() {
 // =====================================================
 
 function chunkBook(text: string, targetSize: number): string[] {
+  // Stage 1: split by paragraphs (preferred — keeps semantic units intact)
   const paragraphs = text.split(/\n\s*\n/);
-  const chunks: string[] = [];
+  const intermediate: string[] = [];
   let current = "";
 
   for (const para of paragraphs) {
     if (current.length + para.length + 2 > targetSize && current.length > 0) {
-      chunks.push(current.trim());
+      intermediate.push(current.trim());
       current = para;
     } else {
       current += (current ? "\n\n" : "") + para;
     }
   }
-  if (current.trim()) chunks.push(current.trim());
+  if (current.trim()) intermediate.push(current.trim());
 
-  return chunks;
+  // Stage 2: any chunk that exceeds 1.5x target size gets force-split
+  // by sentence, then by character if even that's too big. This handles
+  // sources without proper paragraph breaks (PDF extractions, OCR, etc.)
+  const maxAllowed = Math.floor(targetSize * 1.5);
+  const final: string[] = [];
+
+  for (const chunk of intermediate) {
+    if (chunk.length <= maxAllowed) {
+      final.push(chunk);
+      continue;
+    }
+    // Force-split: try sentences first
+    const sentences = chunk.split(/(?<=[.!?])\s+/);
+    let buf = "";
+    for (const sent of sentences) {
+      if (buf.length + sent.length + 1 > targetSize && buf.length > 0) {
+        final.push(buf.trim());
+        buf = sent;
+      } else {
+        buf += (buf ? " " : "") + sent;
+      }
+    }
+    if (buf.trim()) final.push(buf.trim());
+  }
+
+  // Stage 3: anything still too large gets sliced by character count.
+  // This is the hard guarantee — no chunk exceeds maxAllowed.
+  const guaranteed: string[] = [];
+  for (const chunk of final) {
+    if (chunk.length <= maxAllowed) {
+      guaranteed.push(chunk);
+      continue;
+    }
+    for (let i = 0; i < chunk.length; i += targetSize) {
+      guaranteed.push(chunk.slice(i, i + targetSize).trim());
+    }
+  }
+
+  return guaranteed.filter(c => c.length > 0);
 }
 
 // =====================================================
@@ -225,4 +264,4 @@ function sleep(ms: number) {
 }
 
 await main();
-
+    
