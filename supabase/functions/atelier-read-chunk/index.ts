@@ -515,4 +515,95 @@ async function applyDerivableNew(triage: any, claim: any, sourceId: string, loca
 
 async function applyPending(triage: any, claim: any, sourceId: string, locator: string) {
   const { data, error } = await supabase
-    .from(
+    .from("pending_questions")
+    .insert({
+      claim: claim.statement,
+      source_id: sourceId,
+      source_locator: locator,
+      source_excerpt: claim.source_excerpt || null,
+      obstruction: triage.obstruction || null,
+      status: "open",
+    })
+    .select()
+    .single();
+
+  if (error) return { claim: claim.statement, outcome: "pending_insert_error", error: error.message };
+  return { claim: claim.statement, outcome: "pending", pending_question_id: data.id, obstruction: triage.obstruction };
+}
+
+// =====================================================
+// CLAUDE API CALL (with optional prompt caching)
+// =====================================================
+
+async function callClaude(model: string, systemPrompt: string, userMessage: string, maxTokens: number, enableCaching: boolean) {
+  const systemContent = enableCaching
+    ? [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }]
+    : systemPrompt;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      system: systemContent,
+      messages: [{ role: "user", content: userMessage }],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    return { ok: false, error: `Claude API ${response.status}: ${errText}` };
+  }
+
+  const data = await response.json();
+  const text = data?.content?.[0]?.text;
+  if (!text) return { ok: false, error: "Empty Claude response" };
+  return { ok: true, text };
+}
+
+// =====================================================
+// HELPERS
+// =====================================================
+
+function stripCodeFences(text: string) {
+  let cleaned = text.trim();
+
+  // Remove leading ```json or ``` (possibly with whitespace/newlines after)
+  cleaned = cleaned.replace(/^```(?:json|JSON)?\s*\n?/, "");
+
+  // Remove trailing ``` (possibly with whitespace before)
+  cleaned = cleaned.replace(/\n?\s*```\s*$/, "");
+
+  // If there's still extra text before or after the JSON,
+  // try to extract just the JSON object.
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+
+  return cleaned.trim();
+}
+
+function isValidUuid(s: any): boolean {
+  if (typeof s !== "string") return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+function jsonResponse(data: any) {
+  return new Response(JSON.stringify(data), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function errorResponse(step: string, error: string) {
+  return new Response(JSON.stringify({ success: false, step, error }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    status: 500,
+  });
+}
