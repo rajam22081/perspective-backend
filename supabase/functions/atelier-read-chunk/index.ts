@@ -1,19 +1,15 @@
 // =====================================================
 // Myndlabs / Atelier
 // Edge Function: atelier-read-chunk
+// VERSION: Gemini 3.1 Pro via Vertex AI
 //
-// Atelier's reader. Reads design sources (typography books,
-// design monographs, theoretical texts) and integrates what
-// is derivable into Atelier's graph.
-//
-// Architecture mirrors Sable's reader but:
-// - Sonnet 4.6 for extraction (Pass 1) - cheaper, faster
-// - Opus 4.7 with prompt caching for triage (Pass 2)
-// - Triage prompt written for design domain
-// - existing_mechanism resolved by name, not UUID
+// Same architecture, same discipline.
+// Pass 1: extract candidate claims
+// Pass 2: triage each claim against graph
 // =====================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { create as createJWT, getNumericDate } from "https://deno.land/x/djwt@v3.0.2/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,32 +23,94 @@ const supabase = createClient(
   { db: { schema: "myndlabs_atelier" } }
 );
 
-const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY")!;
-const EXTRACTION_MODEL = "claude-sonnet-4-6";
-const TRIAGE_MODEL = "claude-opus-4-7";
+// =====================================================
+// VERTEX AI CONFIG
+// =====================================================
+
+const GCP_SERVICE_ACCOUNT_JSON = Deno.env.get("GCP_SERVICE_ACCOUNT_JSON")!;
+const GCP_PROJECT_ID = Deno.env.get("GCP_PROJECT_ID") || "myndlabs";
+const GCP_REGION = Deno.env.get("GCP_REGION") || "us-central1";
+const MODEL = "gemini-3.1-pro-preview";
+
+let cachedAccessToken: { token: string; expiresAt: number } | null = null;
+
+async function getGcpAccessToken(): Promise<string> {
+  if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 5 * 60 * 1000) {
+    return cachedAccessToken.token;
+  }
+
+  const sa = JSON.parse(GCP_SERVICE_ACCOUNT_JSON);
+  const now = getNumericDate(0);
+  const exp = getNumericDate(60 * 60);
+
+  const payload = {
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/cloud-platform",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp,
+  };
+
+  const privateKey = await importPrivateKey(sa.private_key);
+  const jwt = await createJWT({ alg: "RS256", typ: "JWT" }, payload, privateKey);
+
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text();
+    throw new Error(`Token exchange failed: ${tokenRes.status} ${errText}`);
+  }
+
+  const tokenData = await tokenRes.json();
+  cachedAccessToken = {
+    token: tokenData.access_token,
+    expiresAt: Date.now() + (tokenData.expires_in * 1000),
+  };
+  return tokenData.access_token;
+}
+
+async function importPrivateKey(pem: string): Promise<CryptoKey> {
+  const pemContents = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, "")
+    .replace(/-----END PRIVATE KEY-----/, "")
+    .replace(/\s/g, "");
+
+  const binary = atob(pemContents);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  return await crypto.subtle.importKey(
+    "pkcs8",
+    bytes.buffer,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+}
 
 // =====================================================
 // REQUEST HANDLER
 // =====================================================
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
     const body = await req.json();
     const action = body.action || "read_chunk";
 
-    if (action === "create_source") {
-      return await createSource(body);
-    }
-    if (action === "read_chunk") {
-      return await readChunk(body);
-    }
-    if (action === "get_source_summary") {
-      return await getSourceSummary(body);
-    }
+    if (action === "create_source") return await createSource(body);
+    if (action === "read_chunk") return await readChunk(body);
+    if (action === "get_source_summary") return await getSourceSummary(body);
     return errorResponse("unknown_action", `Unknown action: ${action}`);
   } catch (e) {
     return errorResponse("unhandled", String((e as Error)?.message || e));
@@ -60,14 +118,12 @@ Deno.serve(async (req) => {
 });
 
 // =====================================================
-// ACTION: CREATE SOURCE
+// CREATE SOURCE
 // =====================================================
 
 async function createSource(body: any) {
   const { kind, title, author, reference, notes } = body;
-  if (!kind || !title) {
-    return errorResponse("missing_fields", "kind and title are required");
-  }
+  if (!kind || !title) return errorResponse("missing_fields", "kind and title are required");
 
   const { data, error } = await supabase
     .from("sources")
@@ -87,24 +143,18 @@ async function createSource(body: any) {
 }
 
 // =====================================================
-// ACTION: GET SOURCE SUMMARY
+// GET SOURCE SUMMARY
 // =====================================================
 
 async function getSourceSummary(body: any) {
   const sourceId = body.source_id;
   if (!sourceId) return errorResponse("missing_source_id", "source_id required");
 
-  const { data: source } = await supabase
-    .from("sources")
-    .select("*")
-    .eq("id", sourceId)
-    .single();
-
+  const { data: source } = await supabase.from("sources").select("*").eq("id", sourceId).single();
   const { data: citedMechanisms } = await supabase
     .from("mechanism_cited_in_source")
     .select("mechanism_id, source_framing, locator, mechanisms(name, description, status, confidence)")
     .eq("source_id", sourceId);
-
   const { data: pendingQuestions } = await supabase
     .from("pending_questions")
     .select("*")
@@ -119,30 +169,22 @@ async function getSourceSummary(body: any) {
 }
 
 // =====================================================
-// ACTION: READ CHUNK
+// READ CHUNK
 // =====================================================
 
 async function readChunk(body: any) {
   const { source_id, chunk_text, chunk_locator } = body;
-  if (!source_id || !chunk_text) {
-    return errorResponse("missing_fields", "source_id and chunk_text required");
-  }
+  if (!source_id || !chunk_text) return errorResponse("missing_fields", "source_id and chunk_text required");
 
-  // Pass 1: extract candidate claims with Sonnet (fast, cheap)
   const claims = await extractClaims(chunk_text);
   if (!claims.ok) return errorResponse("extract_claims", claims.error);
 
-  // Pass 2: triage each claim with Opus (rigorous reasoning)
   const results = [];
   for (const claim of claims.data) {
     const graphContext = await loadGraphContext(claim);
     const triage = await triageClaim(claim, graphContext, chunk_text);
     if (!triage.ok) {
-      results.push({
-        claim: claim.statement,
-        outcome: "triage_error",
-        error: triage.error,
-      });
+      results.push({ claim: claim.statement, outcome: "triage_error", error: triage.error });
       continue;
     }
     const applied = await applyTriage(triage.data, claim, source_id, chunk_locator);
@@ -158,7 +200,7 @@ async function readChunk(body: any) {
 }
 
 // =====================================================
-// PASS 1: EXTRACT CLAIMS (Sonnet 4.6)
+// PASS 1: EXTRACT CLAIMS
 // =====================================================
 
 async function extractClaims(chunkText: string) {
@@ -166,7 +208,7 @@ async function extractClaims(chunkText: string) {
 
 Your job: extract every distinct claim this chunk makes. A claim is any assertion about how design works, what causes what visually, what holds and what doesn't, what should or shouldn't be done. Quoted assertions are claims. Paraphrased ideas are claims. Pure description of an example is not a claim — but the principle the example illustrates IS a claim.
 
-Output strict JSON. No preamble. No markdown.
+Output strict JSON. No preamble. No markdown fences.
 
 {
   "claims": [
@@ -185,14 +227,13 @@ Rules:
 - If the chunk has no claims (just narrative or biography), output {"claims": []}.
 - statement must be a complete sentence capturing the claim's logic, not a topic phrase.`;
 
-  const response = await callClaude(EXTRACTION_MODEL, systemPrompt, `Extract all claims:\n\n---\n${chunkText}\n---`, 8192, false);
+  const userMessage = `Extract all claims from this chunk:\n\n---\n${chunkText}\n---`;
+  const response = await callGemini(systemPrompt, userMessage, 8192, 0.3);
   if (!response.ok) return { ok: false, error: response.error };
 
   try {
     const parsed = JSON.parse(stripCodeFences(response.text));
-    if (!Array.isArray(parsed.claims)) {
-      return { ok: false, error: "No claims array in response" };
-    }
+    if (!Array.isArray(parsed.claims)) return { ok: false, error: "No claims array in response" };
     return { ok: true, data: parsed.claims };
   } catch (e) {
     return { ok: false, error: `JSON parse: ${response.text.slice(0, 300)}` };
@@ -231,7 +272,6 @@ async function loadGraphContext(claim: any) {
     }
   }
 
-  // Always include rock-solid mechanisms - the foundation
   const { data: rockSolid } = await supabase
     .from("mechanisms")
     .select("id, name, description, derivation, boundary, status, confidence")
@@ -239,7 +279,6 @@ async function loadGraphContext(claim: any) {
     .order("updated_at", { ascending: false })
     .limit(20);
 
-  // Combine, dedupe
   const all = [...relevantMechanisms];
   for (const r of rockSolid || []) {
     if (!all.find((m) => m.id === r.id)) all.push(r);
@@ -254,7 +293,7 @@ async function loadGraphContext(claim: any) {
 }
 
 // =====================================================
-// PASS 2: TRIAGE (Opus 4.7 with prompt caching)
+// PASS 2: TRIAGE
 // =====================================================
 
 async function triageClaim(claim: any, context: any, fullChunk: string) {
@@ -269,9 +308,7 @@ async function triageClaim(claim: any, context: any, fullChunk: string) {
     .map((c: any) => `- ${c.name}${c.definition ? ": " + c.definition : ""}`)
     .join("\n");
 
-  // System prompt - this part is CACHED across calls within session.
-  // The discipline of Atelier's reading - constant.
-  const systemPromptStable = `You are Atelier, a careful website architect. You design considered, editorial, character-driven web work for Myndlabs and its clients. Right now you are reading a foundational text and you have encountered a claim. You must decide whether this claim's underlying MECHANISM enters your graph of understanding, or whether it must wait as a pending question.
+  const systemPrompt = `You are Atelier, a careful website architect. You design considered, editorial, character-driven web work for Myndlabs and its clients. Right now you are reading a foundational text and you have encountered a claim. You must decide whether this claim's underlying MECHANISM enters your graph of understanding, or whether it must wait as a pending question.
 
 CRITICAL DISCIPLINE
 You do not accept claims because a source stated them. A source's authority is not evidence. You accept a mechanism only when:
@@ -301,25 +338,29 @@ Almost every claim about design CAN be derived from these foundations. When you 
 DESIGN HAS TASTE — BUT TASTE IS NOT THE GROUND
 Some design claims are about taste, register, or contextual fit. These are real but they are not foundational mechanisms. Mark them as pending if they cannot be derived. Atelier's taste emerges from rigorous mechanism understanding, not from absorbing other people's taste.
 
+DEFINITIONS, HISTORICAL FACTS, AND ECONOMIC CLAIMS ARE NOT MECHANISMS
+- A definition of a paper standard or measurement system is not a mechanism. Queue as pending.
+- A historical fact about who invented something is not a mechanism. Queue as pending.
+- An economic claim about production costs is not a perceptual mechanism. Queue as pending.
+- A normative claim ("design SHOULD be X") is not a mechanism. Queue as pending unless it can be derived from cause-and-effect about what works.
+
 OUTPUT FORMAT
-Output strict JSON. One of three outcomes.
+Output strict JSON. No preamble. No markdown fences. One of three outcomes.
 
 OUTCOME 1: existing_mechanism
-The claim points at a mechanism already in your graph.
 {
   "outcome": "existing_mechanism",
-  "mechanism_name": "exact name from the list (e.g. 'attention concentrates in absence of competition')",
-  "source_framing": "how this source phrases the mechanism (their words)",
+  "mechanism_name": "exact name from the list",
+  "source_framing": "how this source phrases the mechanism",
   "reasoning": "why this is the same mechanism, not a different one"
 }
 
 OUTCOME 2: derivable_new
-The mechanism is new but can be derived from existing graph nodes or foundational observations.
 {
   "outcome": "derivable_new",
   "mechanism": {
-    "name": "short canonical name, lowercase, dash-or-space separated",
-    "description": "what this mechanism explains, the cause-and-effect",
+    "name": "short canonical name, lowercase",
+    "description": "what this mechanism explains",
     "derivation": "how this follows from existing mechanisms (reference by name) or foundational observations",
     "boundary": "specific conditions under which this stops applying",
     "origin": "derived" or "foundational",
@@ -331,22 +372,19 @@ The mechanism is new but can be derived from existing graph nodes or foundationa
 }
 
 OUTCOME 3: pending
-The mechanism cannot yet be derived from your graph.
 {
   "outcome": "pending",
   "obstruction": "what's missing in the graph that would let you derive this. Be specific."
 }
 
 RULES
-- Be conservative. When in doubt, choose pending. A small rock-solid graph beats a large shaky one.
+- Be conservative. When in doubt, choose pending.
 - "derivable_new" requires a real derivation referencing real existing mechanisms or genuine foundational observations.
-- "foundational" is rare. Use only for claims that genuinely don't reduce further (e.g. "human attention is finite and competitive" — at some point you have to start somewhere).
-- The empty graph is the most common starting state. Almost everything is pending. One or two truly foundational mechanisms emerge from the first few chunks. That's correct.
-- For "existing_mechanism", only match if the claim IS the same mechanism, possibly differently worded. Don't match loosely.
+- "foundational" is rare. Use only for claims that genuinely don't reduce further.
+- For "existing_mechanism", only match if the claim IS the same mechanism, possibly differently worded.
 
 Output JSON only. No markdown fences.`;
 
-  // Variable part - the specific call.
   const userMessage = `YOUR CURRENT GRAPH
 
 EXISTING MECHANISMS (${context.mechanisms.length}):
@@ -365,8 +403,7 @@ ${fullChunk}
 
 Triage this claim now.`;
 
-  // Use prompt caching on the system prompt
-  const response = await callClaude(TRIAGE_MODEL, systemPromptStable, userMessage, 2048, true);
+  const response = await callGemini(systemPrompt, userMessage, 4096, 0.2);
   if (!response.ok) return { ok: false, error: response.error };
 
   try {
@@ -402,20 +439,10 @@ async function applyExistingMechanism(triage: any, claim: any, sourceId: string,
     if (byName) mechanismId = byName.id;
   }
 
-  if (!mechanismId && triage.mechanism_id && isValidUuid(triage.mechanism_id)) {
-    const { data: byId } = await supabase
-      .from("mechanisms")
-      .select("id")
-      .eq("id", triage.mechanism_id)
-      .maybeSingle();
-    if (byId) mechanismId = byId.id;
-  }
-
-  // Graceful fallback to pending if no match
   if (!mechanismId) {
     return await applyPending(
       {
-        obstruction: "Triage proposed an existing mechanism, but no mechanism was found by name or id. Original reasoning: " + (triage.reasoning || "(none)"),
+        obstruction: "Triage proposed an existing mechanism, but no mechanism was found by name. Original reasoning: " + (triage.reasoning || "(none)"),
       },
       claim, sourceId, locator
     );
@@ -470,7 +497,6 @@ async function applyDerivableNew(triage: any, claim: any, sourceId: string, loca
     mechanismId = inserted.id;
   }
 
-  // Link concepts
   for (const conceptName of m.concepts || []) {
     const cn = String(conceptName).toLowerCase().trim();
     if (!cn) continue;
@@ -486,124 +512,9 @@ async function applyDerivableNew(triage: any, claim: any, sourceId: string, loca
     }
   }
 
-  // Link derivations
   for (const sourceName of m.derives_from_mechanisms || []) {
     const sn = String(sourceName).toLowerCase().trim();
     if (!sn) continue;
     const { data: src } = await supabase
       .from("mechanisms")
-      .select("id")
-      .eq("name", sn)
-      .maybeSingle();
-    if (src && src.id !== mechanismId) {
-      await supabase
-        .from("mechanism_derives_from_mechanism")
-        .upsert({ derived_id: mechanismId, source_id: src.id, reasoning: triage.reasoning || null }, { onConflict: "derived_id,source_id" });
-    }
-  }
-
-  // Citation
-  await supabase.from("mechanism_cited_in_source").upsert({
-    mechanism_id: mechanismId,
-    source_id: sourceId,
-    locator,
-    source_framing: triage.source_framing || null,
-  }, { onConflict: "mechanism_id,source_id" });
-
-  return { claim: claim.statement, outcome: "derivable_new", mechanism_id: mechanismId, mechanism_name: m.name, reasoning: triage.reasoning };
-}
-
-async function applyPending(triage: any, claim: any, sourceId: string, locator: string) {
-  const { data, error } = await supabase
-    .from("pending_questions")
-    .insert({
-      claim: claim.statement,
-      source_id: sourceId,
-      source_locator: locator,
-      source_excerpt: claim.source_excerpt || null,
-      obstruction: triage.obstruction || null,
-      status: "open",
-    })
-    .select()
-    .single();
-
-  if (error) return { claim: claim.statement, outcome: "pending_insert_error", error: error.message };
-  return { claim: claim.statement, outcome: "pending", pending_question_id: data.id, obstruction: triage.obstruction };
-}
-
-// =====================================================
-// CLAUDE API CALL (with optional prompt caching)
-// =====================================================
-
-async function callClaude(model: string, systemPrompt: string, userMessage: string, maxTokens: number, enableCaching: boolean) {
-  const systemContent = enableCaching
-    ? [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }]
-    : systemPrompt;
-
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      system: systemContent,
-      messages: [{ role: "user", content: userMessage }],
-    }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    return { ok: false, error: `Claude API ${response.status}: ${errText}` };
-  }
-
-  const data = await response.json();
-  const text = data?.content?.[0]?.text;
-  if (!text) return { ok: false, error: "Empty Claude response" };
-  return { ok: true, text };
-}
-
-// =====================================================
-// HELPERS
-// =====================================================
-
-function stripCodeFences(text: string) {
-  let cleaned = text.trim();
-
-  // Remove leading ```json or ``` (possibly with whitespace/newlines after)
-  cleaned = cleaned.replace(/^```(?:json|JSON)?\s*\n?/, "");
-
-  // Remove trailing ``` (possibly with whitespace before)
-  cleaned = cleaned.replace(/\n?\s*```\s*$/, "");
-
-  // If there's still extra text before or after the JSON,
-  // try to extract just the JSON object.
-  const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-  }
-
-  return cleaned.trim();
-}
-
-function isValidUuid(s: any): boolean {
-  if (typeof s !== "string") return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
-}
-
-function jsonResponse(data: any) {
-  return new Response(JSON.stringify(data), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
-
-function errorResponse(step: string, error: string) {
-  return new Response(JSON.stringify({ success: false, step, error }), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-    status: 500,
-  });
-}
+      
