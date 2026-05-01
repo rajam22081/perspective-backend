@@ -517,4 +517,120 @@ async function applyDerivableNew(triage: any, claim: any, sourceId: string, loca
     if (!sn) continue;
     const { data: src } = await supabase
       .from("mechanisms")
+    .select("id")
+      .eq("name", sn)
+      .maybeSingle();
+    if (src && src.id !== mechanismId) {
+      await supabase
+        .from("mechanism_derives_from_mechanism")
+        .upsert({ derived_id: mechanismId, source_id: src.id, reasoning: triage.reasoning || null }, { onConflict: "derived_id,source_id" });
+    }
+  }
+
+  await supabase.from("mechanism_cited_in_source").upsert({
+    mechanism_id: mechanismId,
+    source_id: sourceId,
+    locator,
+    source_framing: triage.source_framing || null,
+  }, { onConflict: "mechanism_id,source_id" });
+
+  return { claim: claim.statement, outcome: "derivable_new", mechanism_id: mechanismId, mechanism_name: m.name, reasoning: triage.reasoning };
+}
+
+async function applyPending(triage: any, claim: any, sourceId: string, locator: string) {
+  const { data, error } = await supabase
+    .from("pending_questions")
+    .insert({
+      claim: claim.statement,
+      source_id: sourceId,
+      source_locator: locator,
+      source_excerpt: claim.source_excerpt || null,
+      obstruction: triage.obstruction || null,
+      status: "open",
+    })
+    .select()
+    .single();
+
+  if (error) return { claim: claim.statement, outcome: "pending_insert_error", error: error.message };
+  return { claim: claim.statement, outcome: "pending", pending_question_id: data.id, obstruction: triage.obstruction };
+}
+
+// =====================================================
+// GEMINI API CALL
+// =====================================================
+
+async function callGemini(systemPrompt: string, userMessage: string, maxTokens: number, temperature: number) {
+  let accessToken: string;
+  try {
+    accessToken = await getGcpAccessToken();
+  } catch (e) {
+    return { ok: false, error: `GCP auth: ${(e as Error).message}` };
+  }
+
+  const url = `https://${GCP_REGION}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/publishers/google/models/${MODEL}:generateContent`;
+
+  const body = {
+    contents: [
+      { role: "user", parts: [{ text: userMessage }] },
+    ],
+    systemInstruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    generationConfig: {
+      temperature,
+      maxOutputTokens: maxTokens,
+      responseMimeType: "application/json",
+    },
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    return { ok: false, error: `Gemini API ${response.status}: ${errText}` };
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    return { ok: false, error: `Empty Gemini response: ${JSON.stringify(data).slice(0, 300)}` };
+  }
+  return { ok: true, text };
+}
+
+// =====================================================
+// HELPERS
+// =====================================================
+
+function stripCodeFences(text: string) {
+  let cleaned = text.trim();
+  cleaned = cleaned.replace(/^```(?:json|JSON)?\s*\n?/, "");
+  cleaned = cleaned.replace(/\n?\s*```\s*$/, "");
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+  return cleaned.trim();
+}
+
+function jsonResponse(data: any) {
+  return new Response(JSON.stringify(data), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function errorResponse(step: string, error: string) {
+  return new Response(JSON.stringify({ success: false, step, error }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    status: 500,
+  });
+}
       
