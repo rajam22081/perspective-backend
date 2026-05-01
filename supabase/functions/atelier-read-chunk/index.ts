@@ -29,7 +29,7 @@ const supabase = createClient(
 
 const GCP_SERVICE_ACCOUNT_JSON = Deno.env.get("GCP_SERVICE_ACCOUNT_JSON")!;
 const GCP_PROJECT_ID = Deno.env.get("GCP_PROJECT_ID") || "myndlabs";
-const GCP_REGION = Deno.env.get("GCP_REGION") || "us-central1";
+const GCP_REGION = Deno.env.get("GCP_REGION") || "global";
 const MODEL = "gemini-3.1-pro-preview";
 
 let cachedAccessToken: { token: string; expiresAt: number } | null = null;
@@ -567,7 +567,13 @@ async function callGemini(systemPrompt: string, userMessage: string, maxTokens: 
     return { ok: false, error: `GCP auth: ${(e as Error).message}` };
   }
 
-  const url = `https://${GCP_REGION}-aiplatform.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/publishers/google/models/${MODEL}:generateContent`;
+  const location = GCP_REGION === "global" ? "global" : GCP_REGION;
+const host =
+  location === "global"
+    ? "aiplatform.googleapis.com"
+    : `${location}-aiplatform.googleapis.com`;
+
+const url = `https://${host}/v1/projects/${GCP_PROJECT_ID}/locations/${location}/publishers/google/models/${MODEL}:generateContent`;
 
   const body = {
     contents: [
