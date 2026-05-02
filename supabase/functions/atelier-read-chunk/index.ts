@@ -520,4 +520,215 @@ async function applyEncounter(encounter: any, sourceId: string, locator: string)
     case "not_a_claim":
       return await applyNotAClaim(encounter, sourceId, locator);
     default:
-      return { outcome: "u
+      return { outcome: "unknown", error: `Unknown outcome: ${encounter.outcome}` };
+  }
+}
+
+async function applyExisting(e: any, sourceId: string, locator: string) {
+  if (!e.matches_existing_name) {
+    return await applyNewEntry(
+      { ...e, entry: { claim: e.claim_or_concept, notes: "Originally proposed as 'existing' but no name supplied" } },
+      sourceId, locator
+    );
+  }
+
+  const name = e.matches_existing_name.toLowerCase().trim();
+  const { data: mech } = await supabase
+    .from("mechanisms")
+    .select("id")
+    .eq("name", name)
+    .maybeSingle();
+
+  if (!mech) {
+    return await applyNewEntry(
+      { ...e, entry: { claim: e.claim_or_concept, notes: `Originally 'existing' matching '${name}' but not in graph` } },
+      sourceId, locator
+    );
+  }
+
+  await supabase.from("mechanism_cited_in_source").upsert({
+    mechanism_id: mech.id,
+    source_id: sourceId,
+    locator,
+    source_framing: e.source_framing || null,
+  }, { onConflict: "mechanism_id,source_id" });
+
+  return {
+    outcome: "existing",
+    mechanism_id: mech.id,
+    matched_name: name,
+    refinement: e.refinement || null,
+  };
+}
+
+async function applyNewMechanism(e: any, sourceId: string, locator: string) {
+  const m = e.mechanism;
+  if (!m || !m.name || !m.description || !m.derivation || !m.boundary) {
+    return { outcome: "new_mechanism_malformed", error: "Mechanism missing required fields" };
+  }
+
+  const { data: existing } = await supabase
+    .from("mechanisms")
+    .select("id")
+    .eq("name", m.name.toLowerCase())
+    .maybeSingle();
+
+  let mechanismId: string;
+  if (existing) {
+    mechanismId = existing.id;
+  } else {
+    const origin = m.origin === "foundational" ? "foundational" : "derived";
+    const { data: inserted, error } = await supabase
+      .from("mechanisms")
+      .insert({
+        name: m.name.toLowerCase(),
+        description: m.description,
+        what_it_means: m.what_it_means || null,
+        derivation: m.derivation,
+        boundary: m.boundary,
+        outside_boundary: m.outside_boundary || null,
+        origin,
+        status: "theoretical",
+        confidence: 0.5,
+      })
+      .select()
+      .single();
+
+    if (error) return { outcome: "new_mechanism_insert_error", error: error.message };
+    mechanismId = inserted.id;
+  }
+
+  for (const conceptName of m.concepts || []) {
+    const cn = String(conceptName).toLowerCase().trim();
+    if (!cn) continue;
+    const { data: c } = await supabase
+      .from("concepts")
+      .upsert({ name: cn }, { onConflict: "name" })
+      .select()
+      .single();
+    if (c) {
+      await supabase
+        .from("mechanism_uses_concept")
+        .upsert({ mechanism_id: mechanismId, concept_id: c.id }, { onConflict: "mechanism_id,concept_id" });
+    }
+  }
+
+  for (const sourceName of m.derives_from_mechanisms || []) {
+    const sn = String(sourceName).toLowerCase().trim();
+    if (!sn) continue;
+    const { data: src } = await supabase
+      .from("mechanisms").select("id").eq("name", sn).maybeSingle();
+    if (src && src.id !== mechanismId) {
+      await supabase.from("mechanism_derives_from_mechanism").upsert(
+        { derived_id: mechanismId, source_id: src.id },
+        { onConflict: "derived_id,source_id" }
+      );
+    }
+  }
+
+  for (const alt of e.alternatives || []) {
+    if (!alt.alternative || !alt.conditions_for_use) continue;
+    await supabase.from("mechanism_alternatives").insert({
+      mechanism_id: mechanismId,
+      alternative: alt.alternative,
+      comparison: alt.comparison || "",
+      conditions_for_use: alt.conditions_for_use,
+    });
+  }
+
+  await supabase.from("mechanism_cited_in_source").upsert({
+    mechanism_id: mechanismId,
+    source_id: sourceId,
+    locator,
+    source_framing: null,
+  }, { onConflict: "mechanism_id,source_id" });
+
+  return {
+    outcome: "new_mechanism",
+    mechanism_id: mechanismId,
+    name: m.name,
+    alternatives_added: (e.alternatives || []).length,
+  };
+}
+
+async function applyNewEntry(e: any, sourceId: string, locator: string) {
+  const entry = e.entry || {};
+  const claim = entry.claim || e.claim_or_concept || "(no claim text)";
+
+  const { data: inserted, error } = await supabase
+    .from("entries")
+    .insert({
+      claim,
+      what_it_means: entry.what_it_means || null,
+      why_it_holds: entry.why_it_holds || null,
+      boundary: entry.boundary || null,
+      outside_boundary: entry.outside_boundary || null,
+      status: entry.why_it_holds ? "worked_through_partial" : "encountered_without_trace",
+      notes: entry.notes || null,
+    })
+    .select()
+    .single();
+
+  if (error) return { outcome: "new_entry_insert_error", error: error.message };
+  const entryId = inserted.id;
+
+  for (const conceptName of entry.concepts || []) {
+    const cn = String(conceptName).toLowerCase().trim();
+    if (!cn) continue;
+    const { data: c } = await supabase
+      .from("concepts").upsert({ name: cn }, { onConflict: "name" }).select().single();
+    if (c) {
+      await supabase.from("entry_uses_concept").upsert(
+        { entry_id: entryId, concept_id: c.id },
+        { onConflict: "entry_id,concept_id" }
+      );
+    }
+  }
+
+  for (const alt of e.alternatives || []) {
+    if (!alt.alternative || !alt.conditions_for_use) continue;
+    await supabase.from("entry_alternatives").insert({
+      entry_id: entryId,
+      alternative: alt.alternative,
+      comparison: alt.comparison || "",
+      conditions_for_use: alt.conditions_for_use,
+    });
+  }
+
+  await supabase.from("entry_cited_in_source").upsert({
+    entry_id: entryId,
+    source_id: sourceId,
+    locator,
+    source_framing: e.source_framing || null,
+  }, { onConflict: "entry_id,source_id" });
+
+  return { outcome: "new_entry", entry_id: entryId, claim };
+}
+
+async function applyUnresolved(e: any, sourceId: string, locator: string) {
+  const { data, error } = await supabase
+    .from("unresolved_encounters")
+    .insert({
+      what_was_encountered: e.claim_or_concept || "(no description)",
+      source_id: sourceId,
+      source_locator: locator,
+      source_excerpt: e.source_excerpt || null,
+      why_unresolved: e.why_unresolved || "(not specified)",
+      what_would_resolve_it: e.what_would_resolve_it || null,
+      status: "open",
+    })
+    .select()
+    .single();
+
+  if (error) return { outcome: "unresolved_insert_error", error: error.message };
+  return { outcome: "unresolved", id: data.id, what: e.claim_or_concept };
+}
+
+async function applyNotAClaim(e: any, sourceId: string, locator: string) {
+  return {
+    outcome: "not_a_claim",
+    kind: e.kind || "unspecified",
+    note: e.brief_note || "",
+  };
+}
+
