@@ -468,4 +468,187 @@ Output strict JSON. No preamble. No markdown fences.
         "concepts": ["concept1", "concept2"],
         "notes": "what makes this an entry rather than a mechanism — name the gaps explicitly"
       },
-      "alternatives": [.
+      "alternatives":  [...as above, when articulable...],
+
+      // For OUTCOME D (unresolved):
+      "what_would_resolve_it": "what foundational understanding or further reasoning would let you account for this",
+      "why_unresolved": "specific account of what your reasoning could not bridge",
+
+      // For OUTCOME E (not_a_claim):
+      "kind": "historical | methodological | normative | descriptive | pedagogical",
+      "brief_note": "one sentence on what the source is doing here"
+    }
+  ]
+}
+
+RULES
+
+- Use 'foundational' rarely. A foundational mechanism reduces to physics, biology, or fundamental facts about working memory and perception that don't decompose further. Most claims, even ones that feel basic, are derived from foundational claims about bounded attention, working memory, or material reality.
+
+- Use 'new_mechanism' only when the trace is clean and the boundary is clear. When in doubt, use 'new_entry' and be honest about what's incomplete. A small set of clean mechanisms beats a large set of shaky ones.
+
+- Use 'unresolved' when you encounter something substantive but cannot construct a trace. This is honest, not failure. It tells you what foundations you still need.
+
+- Use 'not_a_claim' for clearly non-design-mechanism material. Do not dump uncertain material here — uncertain material is 'new_entry' or 'unresolved'.
+
+- For 'existing' matches: only if it is genuinely the same mechanism, possibly differently worded. Don't match loosely. When unsure, treat it as a new entry that can later mature into a mechanism or merge with existing one.
+
+- alternatives are first-class. When you state a mechanism, articulate at least one alternative if you can. A mechanism without alternatives is incomplete reasoning.
+
+- Be concise but specific. Generic boundaries and vague conditions are worse than honestly stating "I cannot articulate this precisely yet."
+
+Output JSON only. No markdown fences. No commentary outside the JSON.`;
+}
+
+function buildReasoningUserMessage(chunkText: string) {
+  return `Read this chunk carefully. For each substantive encounter, reason through what it means, why it might hold, the boundary, what happens outside it, and what alternatives exist. Then decide which outcome applies.
+
+Chunk text:
+
+---
+${chunkText}
+---
+
+Reason through this chunk now. Output JSON.`;
+}
+
+// =====================================================
+// APPLY ENCOUNTER
+// =====================================================
+
+async function applyEncounter(encounter: any, sourceId: string, locator: string) {
+  switch (encounter.outcome) {
+    case "existing":
+      return await applyExisting(encounter, sourceId, locator);
+    case "new_mechanism":
+      return await applyNewMechanism(encounter, sourceId, locator);
+    case "new_entry":
+      return await applyNewEntry(encounter, sourceId, locator);
+    case "unresolved":
+      return await applyUnresolved(encounter, sourceId, locator);
+    case "not_a_claim":
+      return await applyNotAClaim(encounter, sourceId, locator);
+    default:
+      return { outcome: "unknown", error: `Unknown outcome: ${encounter.outcome}` };
+  }
+}
+
+async function applyExisting(e: any, sourceId: string, locator: string) {
+  if (!e.matches_existing_name) {
+    // Fall through to new entry — the model said existing but didn't name what
+    return await applyNewEntry(
+      { ...e, entry: { claim: e.claim_or_concept, notes: "Originally proposed as 'existing' but no name supplied" } },
+      sourceId, locator
+    );
+  }
+
+  const name = e.matches_existing_name.toLowerCase().trim();
+  const { data: mech } = await supabase
+    .from("mechanisms")
+    .select("id")
+    .eq("name", name)
+    .maybeSingle();
+
+  if (!mech) {
+    // The named mechanism doesn't exist. Treat as new_entry with note.
+    return await applyNewEntry(
+      { ...e, entry: { claim: e.claim_or_concept, notes: `Originally proposed as 'existing' matching '${name}' but no such mechanism in graph` } },
+      sourceId, locator
+    );
+  }
+
+  // Add citation
+  await supabase.from("mechanism_cited_in_source").upsert({
+    mechanism_id: mech.id,
+    source_id: sourceId,
+    locator,
+    source_framing: e.source_framing || null,
+  }, { onConflict: "mechanism_id,source_id" });
+
+  // Optional: store refinement as a note for human review later
+  return {
+    outcome: "existing",
+    mechanism_id: mech.id,
+    matched_name: name,
+    refinement: e.refinement || null,
+  };
+}
+
+async function applyNewMechanism(e: any, sourceId: string, locator: string) {
+  const m = e.mechanism;
+  if (!m || !m.name || !m.description || !m.derivation || !m.boundary) {
+    return { outcome: "new_mechanism_malformed", error: "Mechanism missing required fields" };
+  }
+
+  // Check if name already exists; if so, treat as existing
+  const { data: existing } = await supabase
+    .from("mechanisms")
+    .select("id")
+    .eq("name", m.name.toLowerCase())
+    .maybeSingle();
+
+  let mechanismId: string;
+  if (existing) {
+    mechanismId = existing.id;
+  } else {
+    const origin = m.origin === "foundational" ? "foundational" : "derived";
+    const { data: inserted, error } = await supabase
+      .from("mechanisms")
+      .insert({
+        name: m.name.toLowerCase(),
+        description: m.description,
+        what_it_means: m.what_it_means || null,
+        derivation: m.derivation,
+        boundary: m.boundary,
+        outside_boundary: m.outside_boundary || null,
+        origin,
+        status: "theoretical",
+        confidence: 0.5,
+      })
+      .select()
+      .single();
+
+    if (error) return { outcome: "new_mechanism_insert_error", error: error.message };
+    mechanismId = inserted.id;
+  }
+
+  // Concepts
+  for (const conceptName of m.concepts || []) {
+    const cn = String(conceptName).toLowerCase().trim();
+    if (!cn) continue;
+    const { data: c } = await supabase
+      .from("concepts")
+      .upsert({ name: cn }, { onConflict: "name" })
+      .select()
+      .single();
+    if (c) {
+      await supabase
+        .from("mechanism_uses_concept")
+        .upsert({ mechanism_id: mechanismId, concept_id: c.id }, { onConflict: "mechanism_id,concept_id" });
+    }
+  }
+
+  // Derivation links
+  for (const sourceName of m.derives_from_mechanisms || []) {
+    const sn = String(sourceName).toLowerCase().trim();
+    if (!sn) continue;
+    const { data: src } = await supabase
+      .from("mechanisms").select("id").eq("name", sn).maybeSingle();
+    if (src && src.id !== mechanismId) {
+      await supabase.from("mechanism_derives_from_mechanism").upsert(
+        { derived_id: mechanismId, source_id: src.id },
+        { onConflict: "derived_id,source_id" }
+      );
+    }
+  }
+
+  // Alternatives — first-class data
+  for (const alt of e.alternatives || []) {
+    if (!alt.alternative || !alt.conditions_for_use) continue;
+    await supabase.from("mechanism_alternatives").insert({
+      mechanism_id: mechanismId,
+      alternative: alt.alternative,
+      comparison: alt.comparison || "",
+      conditions_for_use: alt.conditions_for_use,
+    });
+  }
