@@ -2,37 +2,32 @@
 // Myndlabs / Atelier
 // Edge Function: atelier-read-chunk
 //
-// VERSION: reason-through-and-articulate (replaces triage)
+// VERSION: multimodal reasoning (text + image)
 //
-// This is the core change. The previous version treated reading
-// as triage: extract claims, route each through a sieve, decide
-// existing/derivable/pending. That's filtering. This is something
-// different.
+// This extends the reason-through-and-articulate function to
+// accept visual input alongside text. When a page image is
+// provided, Atelier reasons about both — what the text claims
+// and what the visual demonstrates.
 //
-// Atelier is a student. Not yet mature. The graph is small and
-// provisional. Atelier cannot yet *see* a page the way a master
-// designer sees one — that comes later, after enough cases have
-// been worked through.
+// For design literature this is essential. The text describes
+// a typographic principle; the image shows a specimen of it.
+// The text discusses a brand identity decision; the image
+// shows the actual logo. Atelier reading text alone misses
+// half the source.
 //
-// What Atelier *can* do — what Atelier *should* do — is reason
-// carefully through every substantive encounter. For each claim
-// or concept or fact in the source, Atelier works out:
+// Request shape:
+//   {
+//     "action": "read_chunk",
+//     "source_id": "uuid",
+//     "chunk_text": "extracted page text",
+//     "page_image_base64": "base64 of page rendered as PNG",  // optional
+//     "page_number": 47,                                      // optional
+//     "chunk_locator": "page 47" or any string
+//   }
 //
-//   - what it means (Atelier's reading, not paraphrase)
-//   - why it might hold (the causal trace, or honest "I can't trace this")
-//   - where the boundary is (specific conditions of application)
-//   - what happens outside the boundary (different mechanism takes over)
-//   - what alternatives a designer could choose (with comparisons)
-//   - under what conditions each alternative is preferable
-//
-// The output of reading is not a triage decision. The output is
-// a body of working-through. Some encounters become full mechanisms.
-// Some become entries (real reasoning, partial trace). Some become
-// unresolved encounters (substantive but unaccountable). Some are
-// not claims at all and are noted briefly.
-//
-// The graph fills with reasoning, not just claims. Over time, this
-// is what gives Atelier its character — structurally, not by prompt.
+// When page_image_base64 is provided, Gemini reasons about
+// the image alongside the text. When it's not, Gemini reasons
+// about text alone (same as v2).
 // =====================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -198,28 +193,28 @@ async function getSourceSummary(body: any) {
 }
 
 // =====================================================
-// READ CHUNK — the core change
+// READ CHUNK
 // =====================================================
 
 async function readChunk(body: any) {
-  const { source_id, chunk_text, chunk_locator } = body;
-  if (!source_id || !chunk_text) return errorResponse("missing_fields", "source_id and chunk_text required");
+  const { source_id, chunk_text, chunk_locator, page_image_base64, page_number } = body;
 
-  // Load Atelier's current understanding — its full graph.
-  // Gemini's 1M context window means we can pass everything,
-  // not a filtered subset. Atelier reasons with all of itself
-  // available, not a retrieval-narrowed slice.
+  if (!source_id) return errorResponse("missing_fields", "source_id required");
+  if (!chunk_text && !page_image_base64) {
+    return errorResponse("missing_fields", "either chunk_text or page_image_base64 required");
+  }
+
   const understanding = await loadCurrentUnderstanding();
 
-  // The reasoning step. Atelier reads the chunk and produces
-  // a structured working-through for each substantive encounter.
-  const reasoning = await reasonThroughChunk(chunk_text, understanding);
+  const reasoning = await reasonThroughChunk(
+    chunk_text || "",
+    page_image_base64 || null,
+    page_number || null,
+    understanding
+  );
+
   if (!reasoning.ok) return errorResponse("reasoning_failed", reasoning.error);
 
-  // Apply the reasoning to the graph. Each working-through
-  // becomes either: a new mechanism, a citation of an existing
-  // mechanism, a new entry, an unresolved encounter, or a
-  // non-claim noted briefly.
   const results = [];
   for (const item of reasoning.data.encounters) {
     const applied = await applyEncounter(item, source_id, chunk_locator);
@@ -229,6 +224,8 @@ async function readChunk(body: any) {
   return jsonResponse({
     success: true,
     chunk_locator,
+    page_number: page_number || null,
+    had_image: !!page_image_base64,
     encounters_processed: results.length,
     results,
   });
@@ -237,17 +234,12 @@ async function readChunk(body: any) {
 // =====================================================
 // LOAD CURRENT UNDERSTANDING
 // =====================================================
-// Atelier's understanding is the entire graph. Mechanisms with
-// their alternatives and outside-boundary. Entries that captured
-// partial reasoning. Unresolved encounters. Concepts.
-//
-// Pass it all. Gemini handles 1M tokens. Atelier reasons holistically.
 
 async function loadCurrentUnderstanding() {
   const { data: mechanisms } = await supabase
     .from("mechanisms")
     .select("id, name, description, what_it_means, derivation, boundary, outside_boundary, origin, status")
-    .order("origin", { ascending: false })  // foundationals first
+    .order("origin", { ascending: false })
     .order("name");
 
   const mechanismIds = (mechanisms || []).map((m: any) => m.id);
@@ -261,7 +253,6 @@ async function loadCurrentUnderstanding() {
     alternatives = data || [];
   }
 
-  // Attach alternatives to each mechanism
   const altsByMech: Record<string, any[]> = {};
   for (const a of alternatives) {
     if (!altsByMech[a.mechanism_id]) altsByMech[a.mechanism_id] = [];
@@ -305,14 +296,19 @@ async function loadCurrentUnderstanding() {
 }
 
 // =====================================================
-// REASON THROUGH CHUNK — the substantive step
+// REASON THROUGH CHUNK — multimodal
 // =====================================================
 
-async function reasonThroughChunk(chunkText: string, understanding: any) {
-  const systemPrompt = buildReasoningSystemPrompt(understanding);
-  const userMessage = buildReasoningUserMessage(chunkText);
+async function reasonThroughChunk(
+  chunkText: string,
+  pageImageBase64: string | null,
+  pageNumber: number | null,
+  understanding: any,
+) {
+  const systemPrompt = buildReasoningSystemPrompt(understanding, !!pageImageBase64);
+  const userParts = buildUserParts(chunkText, pageImageBase64, pageNumber);
 
-  const response = await callGemini(systemPrompt, userMessage, 32000, 0.3);
+  const response = await callGemini(systemPrompt, userParts, 32000, 0.3);
   if (!response.ok) return { ok: false, error: response.error };
 
   try {
@@ -327,8 +323,7 @@ async function reasonThroughChunk(chunkText: string, understanding: any) {
   }
 }
 
-function buildReasoningSystemPrompt(understanding: any) {
-  // Render the understanding as text Atelier reasons against.
+function buildReasoningSystemPrompt(understanding: any, hasImage: boolean) {
   const foundationals = understanding.mechanisms.filter((m: any) => m.origin === "foundational");
   const derived = understanding.mechanisms.filter((m: any) => m.origin === "derived");
 
@@ -347,16 +342,22 @@ function buildReasoningSystemPrompt(understanding: any) {
 
   const foundationalsList = foundationals.map(renderMech).join("\n\n");
   const derivedList = derived.map(renderMech).join("\n\n");
-  const entriesList = understanding.entries.length > 0
-    ? understanding.entries.map((e: any) =>
-        `ENTRY "${e.claim}" [${e.status}]\n   ${e.what_it_means || ""}`
-      ).join("\n\n")
-    : "(none)";
-  const unresolvedList = understanding.unresolved.length > 0
-    ? understanding.unresolved.map((u: any) =>
-        `- ${u.what_was_encountered} (gap: ${u.why_unresolved})`
-      ).join("\n")
-    : "(none)";
+
+  const visualGuidance = hasImage
+    ? `
+
+VISUAL INPUT
+You have been given the page image alongside the text. The image is the source as it actually appears — typography, layout, photographs of designed artifacts, diagrams, specimens. Reason about both. Some of what you encounter will be visual claims demonstrated rather than stated in text. A typography specimen demonstrates a claim about the typeface even if the text doesn't articulate that claim. A photograph of a brand identity demonstrates decisions Atelier should reason about.
+
+When the image and text together carry a substantive encounter:
+- Note what the image makes visible
+- Reason about what the visual artifact demonstrates
+- Treat the visual evidence as part of the encounter — not separate from it
+
+When the image is decorative or auxiliary (a background, an unrelated photograph, page chrome) — note that briefly and reason from the text.
+
+Visual artifacts ARE substantive when they demonstrate design decisions, show typography in use, exemplify mechanisms in action, or provide cases that test or refine principles.`
+    : "";
 
   return `You are Atelier. Right now, you are a student of design — careful, considered, in the early stage of accumulating a working understanding. The graph below is everything you currently know. It is small and provisional. You are not yet a master. Your job is not to filter claims as accepted or rejected. Your job is to reason carefully through every substantive encounter, working out what it means, why it might hold, where the boundary is, and what alternatives exist.
 
@@ -364,63 +365,44 @@ YOUR DISCIPLINE — what makes you Atelier
 
 You do not accept claims because a source asserts them. Authority is not evidence. You accept reasoning when you can trace it from foundations or from understanding you already hold. You acknowledge gaps honestly. You hold alternatives consciously. You think in conditions, not in absolutes.
 
-For every substantive encounter — every claim, concept, or fact — you reason through these questions before deciding what enters your graph:
+For every substantive encounter — every claim, concept, fact, or visual demonstration — you reason through these questions before deciding what enters your graph:
 
   1. WHAT DOES THIS MEAN
-     What is actually being claimed? State it in your own words. Not paraphrase. Working understanding.
+     What is actually being claimed or demonstrated? State it in your own words.
 
   2. WHY MIGHT THIS HOLD
-     What in human perception, attention, cognition, or material reality would make this claim true? Trace the reasoning. If you can construct a clear trace from foundations or from your existing graph, the trace is the derivation. If you cannot, say so honestly.
+     What in human perception, attention, cognition, or material reality would make this hold? Trace the reasoning. If you can construct a clear trace, the trace is the derivation. If you cannot, say so honestly.
 
   3. WHERE IS THE BOUNDARY
-     Under what specific conditions does this hold? Be precise. Generic answers like "in design contexts" are not boundaries. Specific answers like "when the page is text-dense, attention is at first scan, and elements are within 30% size variance" are boundaries.
+     Under what specific conditions does this hold? Be precise.
 
   4. WHAT HAPPENS OUTSIDE THE BOUNDARY
-     When the conditions don't apply, what becomes of the situation? The claim doesn't fail in some empty sense — usually a different mechanism takes over, or the situation becomes a different kind of situation that calls for different reasoning.
+     When the conditions don't apply, what becomes of the situation?
 
   5. WHAT ALTERNATIVES EXIST
-     A designer is not stuck with one approach. What other approaches could handle the same situation? List them. For each, state how it compares to the original claim, and the conditions under which it would be preferable.
-
-This is the work. You do not skip steps. You do not pretend completeness you don't have.
+     What other approaches could handle the same situation? For each, state how it compares and the conditions under which it would be preferable.${visualGuidance}
 
 WHAT IS SUBSTANTIVE — and what is not
 
-A substantive encounter is something the source asserts about how design works — about perception, attention, cognition, communication, material reality, or the choices a designer makes among real options. Substantive encounters call for reasoning.
+A substantive encounter is something the source asserts or demonstrates about how design works — about perception, attention, cognition, communication, material reality, or the choices a designer makes. Substantive encounters call for reasoning.
 
-Not substantive: historical context (when something was invented), biographical material (about the author or another designer), pedagogical asides (about how the author teaches), normative claims about what designers should aspire to ethically, descriptive facts about typeface anatomy or paper standards. These are part of the source's texture but they are not claims about how design works. Note them briefly without deep reasoning.
+Not substantive: historical context, biographical material, pedagogical asides, normative claims about what designers should aspire to ethically, descriptive facts about typeface anatomy or paper standards. These are part of the source's texture but they are not claims about how design works. Note them briefly without deep reasoning.
 
 POSSIBLE OUTCOMES PER ENCOUNTER
 
-After reasoning through a substantive encounter, the encounter resolves into one of:
-
-OUTCOME A: same as something I already understand
-The reasoning leads to recognizing this as the same as a mechanism or entry already in the graph, possibly differently worded. Add a citation. Optionally extend the alternatives or refine the boundary if the source articulates them better than you currently do.
-
-OUTCOME B: new mechanism
-The reasoning produces a clean trace from foundations or existing graph. The boundary is clear. The outside-boundary is clear. The alternatives are articulated. You can state this with the rigor of a mechanism.
-
-OUTCOME C: new entry (worked-through, partial)
-The reasoning is real but incomplete. Maybe the trace doesn't quite reach foundations. Maybe the boundary is unclear. Maybe alternatives aren't yet articulable. Capture the working-through honestly with explicit notes about what's incomplete. An entry can mature into a mechanism later when more reasoning resolves the gaps.
-
-OUTCOME D: unresolved encounter
-You recognize this as substantive — it's about how design works — but you cannot construct a trace. You cannot account for it from your current graph. Be honest. Record what you encountered, why it remains unresolved, and what would let you resolve it (a foundational understanding you don't yet have, more cases, etc.).
-
-OUTCOME E: not a claim about how design works
-Briefly note what kind of material this is (historical, methodological, normative, descriptive, pedagogical) and continue. Do not reason deeply.
+OUTCOME A: existing — same as something you already understand.
+OUTCOME B: new_mechanism — clean trace, clear boundary, articulated alternatives.
+OUTCOME C: new_entry — real reasoning but partial; gaps named explicitly.
+OUTCOME D: unresolved — substantive but you cannot construct a trace.
+OUTCOME E: not_a_claim — historical, methodological, normative, descriptive, pedagogical.
 
 YOUR CURRENT GRAPH
 
-FOUNDATIONAL MECHANISMS (the bedrock you reason from):
+FOUNDATIONAL MECHANISMS:
 ${foundationalsList || "(none yet — you are at the beginning)"}
 
 DERIVED MECHANISMS:
 ${derivedList || "(none yet)"}
-
-ENTRIES (worked-through, not yet mature):
-${entriesList}
-
-UNRESOLVED ENCOUNTERS (acknowledged gaps):
-${unresolvedList}
 
 OUTPUT FORMAT
 
@@ -431,85 +413,94 @@ Output strict JSON. No preamble. No markdown fences.
     {
       "outcome": "existing | new_mechanism | new_entry | unresolved | not_a_claim",
       "claim_or_concept": "what was encountered, in your words",
-      "source_excerpt": "the text from the chunk that triggered this encounter",
+      "source_excerpt": "the text or visual element that triggered this encounter",
+      "visual_evidence": "if the image contributed, briefly describe what you saw",
 
-      // For OUTCOME A (existing):
-      "matches_existing_name": "exact name from your graph",
-      "source_framing": "how this source phrases the same mechanism",
-      "refinement": "optional — how this source's articulation extends your existing entry",
+      "matches_existing_name": "(for existing) exact name from your graph",
+      "source_framing": "(for existing) how this source phrases it",
+      "refinement": "(for existing) optional refinement to existing entry",
 
-      // For OUTCOME B (new_mechanism):
       "mechanism": {
-        "name": "short canonical lowercase name",
-        "what_it_means": "your working-out of what is actually being claimed",
-        "description": "concise statement of the mechanism",
-        "derivation": "the trace from foundations or existing graph",
+        "name": "(for new_mechanism) short canonical lowercase name",
+        "what_it_means": "your working-out of what is being claimed",
+        "description": "concise statement",
+        "derivation": "trace from foundations or existing graph",
         "boundary": "specific conditions",
         "outside_boundary": "what happens when conditions do not apply",
         "origin": "foundational | derived",
-        "concepts": ["concept1", "concept2"],
-        "derives_from_mechanisms": ["existing mechanism name 1", ...]
+        "concepts": ["concept1"],
+        "derives_from_mechanisms": ["existing mechanism name"]
       },
       "alternatives": [
         {
           "alternative": "alternative approach",
-          "comparison": "how it compares to the original",
+          "comparison": "how it compares",
           "conditions_for_use": "when this is preferable"
         }
       ],
 
-      // For OUTCOME C (new_entry):
       "entry": {
-        "claim": "the claim as you understand it",
+        "claim": "(for new_entry) the claim as you understand it",
         "what_it_means": "your working-out",
-        "why_it_holds": "the partial trace, honestly stated — including 'I cannot trace this beyond X'",
-        "boundary": "what you can articulate of the boundary, even if partial",
-        "outside_boundary": "what you can articulate of outside-boundary, if anything",
-        "concepts": ["concept1", "concept2"],
-        "notes": "what makes this an entry rather than a mechanism — name the gaps explicitly"
+        "why_it_holds": "the partial trace, honestly stated",
+        "boundary": "what you can articulate",
+        "outside_boundary": "if anything",
+        "concepts": ["concept1"],
+        "notes": "what makes this an entry rather than a mechanism — name the gaps"
       },
-      "alternatives":  [...as above, when articulable...],
 
-      // For OUTCOME D (unresolved):
-      "what_would_resolve_it": "what foundational understanding or further reasoning would let you account for this",
-      "why_unresolved": "specific account of what your reasoning could not bridge",
+      "what_would_resolve_it": "(for unresolved) what understanding would let you resolve",
+      "why_unresolved": "(for unresolved) what your reasoning could not bridge",
 
-      // For OUTCOME E (not_a_claim):
-      "kind": "historical | methodological | normative | descriptive | pedagogical",
-      "brief_note": "one sentence on what the source is doing here"
+      "kind": "(for not_a_claim) historical | methodological | normative | descriptive | pedagogical",
+      "brief_note": "(for not_a_claim) one sentence"
     }
   ]
 }
 
 RULES
 
-- Use 'foundational' rarely. A foundational mechanism reduces to physics, biology, or fundamental facts about working memory and perception that don't decompose further. Most claims, even ones that feel basic, are derived from foundational claims about bounded attention, working memory, or material reality.
+- Use 'foundational' rarely. Most claims are derived.
+- Use 'new_mechanism' only when trace and boundary are clean. When in doubt, 'new_entry' with honest gaps.
+- 'unresolved' is honest — substantive but unaccountable.
+- 'not_a_claim' for clearly non-design-mechanism material.
+- Alternatives are first-class. When you state a mechanism, articulate at least one alternative if you can.
+- Be concise but specific.
 
-- Use 'new_mechanism' only when the trace is clean and the boundary is clear. When in doubt, use 'new_entry' and be honest about what's incomplete. A small set of clean mechanisms beats a large set of shaky ones.
-
-- Use 'unresolved' when you encounter something substantive but cannot construct a trace. This is honest, not failure. It tells you what foundations you still need.
-
-- Use 'not_a_claim' for clearly non-design-mechanism material. Do not dump uncertain material here — uncertain material is 'new_entry' or 'unresolved'.
-
-- For 'existing' matches: only if it is genuinely the same mechanism, possibly differently worded. Don't match loosely. When unsure, treat it as a new entry that can later mature into a mechanism or merge with existing one.
-
-- alternatives are first-class. When you state a mechanism, articulate at least one alternative if you can. A mechanism without alternatives is incomplete reasoning.
-
-- Be concise but specific. Generic boundaries and vague conditions are worse than honestly stating "I cannot articulate this precisely yet."
-
-Output JSON only. No markdown fences. No commentary outside the JSON.`;
+Output JSON only.`;
 }
 
-function buildReasoningUserMessage(chunkText: string) {
-  return `Read this chunk carefully. For each substantive encounter, reason through what it means, why it might hold, the boundary, what happens outside it, and what alternatives exist. Then decide which outcome applies.
+function buildUserParts(chunkText: string, pageImageBase64: string | null, pageNumber: number | null) {
+  const parts: any[] = [];
 
-Chunk text:
+  let textHeader = "Read this carefully";
+  if (pageNumber) textHeader += ` (page ${pageNumber})`;
+  textHeader += ". For each substantive encounter, reason through what it means, why it might hold, the boundary, what happens outside it, and what alternatives exist. Then decide which outcome applies.";
 
----
-${chunkText}
----
+  if (pageImageBase64) {
+    parts.push({ text: textHeader });
+    parts.push({
+      inlineData: {
+        mimeType: "image/png",
+        data: pageImageBase64,
+      },
+    });
+    if (chunkText) {
+      parts.push({
+        text: `\n\nText extracted from this page:\n\n---\n${chunkText}\n---\n\nReason through this page now. Output JSON.`,
+      });
+    } else {
+      parts.push({
+        text: "\n\n(No text extracted — reason from the visual content alone if substantive.) Output JSON.",
+      });
+    }
+  } else {
+    parts.push({
+      text: `${textHeader}\n\nText:\n\n---\n${chunkText}\n---\n\nReason through this now. Output JSON.`,
+    });
+  }
 
-Reason through this chunk now. Output JSON.`;
+  return parts;
 }
 
 // =====================================================
@@ -529,243 +520,4 @@ async function applyEncounter(encounter: any, sourceId: string, locator: string)
     case "not_a_claim":
       return await applyNotAClaim(encounter, sourceId, locator);
     default:
-      return { outcome: "unknown", error: `Unknown outcome: ${encounter.outcome}` };
-  }
-}
-
-async function applyExisting(e: any, sourceId: string, locator: string) {
-  if (!e.matches_existing_name) {
-    // Fall through to new entry — the model said existing but didn't name what
-    return await applyNewEntry(
-      { ...e, entry: { claim: e.claim_or_concept, notes: "Originally proposed as 'existing' but no name supplied" } },
-      sourceId, locator
-    );
-  }
-
-  const name = e.matches_existing_name.toLowerCase().trim();
-  const { data: mech } = await supabase
-    .from("mechanisms")
-    .select("id")
-    .eq("name", name)
-    .maybeSingle();
-
-  if (!mech) {
-    // The named mechanism doesn't exist. Treat as new_entry with note.
-    return await applyNewEntry(
-      { ...e, entry: { claim: e.claim_or_concept, notes: `Originally proposed as 'existing' matching '${name}' but no such mechanism in graph` } },
-      sourceId, locator
-    );
-  }
-
-  // Add citation
-  await supabase.from("mechanism_cited_in_source").upsert({
-    mechanism_id: mech.id,
-    source_id: sourceId,
-    locator,
-    source_framing: e.source_framing || null,
-  }, { onConflict: "mechanism_id,source_id" });
-
-  // Optional: store refinement as a note for human review later
-  return {
-    outcome: "existing",
-    mechanism_id: mech.id,
-    matched_name: name,
-    refinement: e.refinement || null,
-  };
-}
-
-async function applyNewMechanism(e: any, sourceId: string, locator: string) {
-  const m = e.mechanism;
-  if (!m || !m.name || !m.description || !m.derivation || !m.boundary) {
-    return { outcome: "new_mechanism_malformed", error: "Mechanism missing required fields" };
-  }
-
-  // Check if name already exists; if so, treat as existing
-  const { data: existing } = await supabase
-    .from("mechanisms")
-    .select("id")
-    .eq("name", m.name.toLowerCase())
-    .maybeSingle();
-
-  let mechanismId: string;
-  if (existing) {
-    mechanismId = existing.id;
-  } else {
-    const origin = m.origin === "foundational" ? "foundational" : "derived";
-    const { data: inserted, error } = await supabase
-      .from("mechanisms")
-      .insert({
-        name: m.name.toLowerCase(),
-        description: m.description,
-        what_it_means: m.what_it_means || null,
-        derivation: m.derivation,
-        boundary: m.boundary,
-        outside_boundary: m.outside_boundary || null,
-        origin,
-        status: "theoretical",
-        confidence: 0.5,
-      })
-      .select()
-      .single();
-
-    if (error) return { outcome: "new_mechanism_insert_error", error: error.message };
-    mechanismId = inserted.id;
-  }
-
-  // Concepts
-  for (const conceptName of m.concepts || []) {
-    const cn = String(conceptName).toLowerCase().trim();
-    if (!cn) continue;
-    const { data: c } = await supabase
-      .from("concepts")
-      .upsert({ name: cn }, { onConflict: "name" })
-      .select()
-      .single();
-    if (c) {
-      await supabase
-        .from("mechanism_uses_concept")
-        .upsert({ mechanism_id: mechanismId, concept_id: c.id }, { onConflict: "mechanism_id,concept_id" });
-    }
-  }
-
-  // Derivation links
-  for (const sourceName of m.derives_from_mechanisms || []) {
-    const sn = String(sourceName).toLowerCase().trim();
-    if (!sn) continue;
-    const { data: src } = await supabase
-      .from("mechanisms").select("id").eq("name", sn).maybeSingle();
-    if (src && src.id !== mechanismId) {
-      await supabase.from("mechanism_derives_from_mechanism").upsert(
-        { derived_id: mechanismId, source_id: src.id },
-        { onConflict: "derived_id,source_id" }
-      );
-    }
-  }
-
-  // Alternatives — first-class data
-  for (const alt of e.alternatives || []) {
-    if (!alt.alternative || !alt.conditions_for_use) continue;
-    await supabase.from("mechanism_alternatives").insert({
-      mechanism_id: mechanismId,
-      alternative: alt.alternative,
-      comparison: alt.comparison || "",
-      conditions_for_use: alt.conditions_for_use,
-    });
-  }
-  // Source citation
-  await supabase.from("entry_cited_in_source").upsert({
-    entry_id: entryId,
-    source_id: sourceId,
-    locator,
-    source_framing: e.source_framing || null,
-  }, { onConflict: "entry_id,source_id" });
-
-  return { outcome: "new_entry", entry_id: entryId, claim };
-}
-
-async function applyUnresolved(e: any, sourceId: string, locator: string) {
-  const { data, error } = await supabase
-    .from("unresolved_encounters")
-    .insert({
-      what_was_encountered: e.claim_or_concept || "(no description)",
-      source_id: sourceId,
-      source_locator: locator,
-      source_excerpt: e.source_excerpt || null,
-      why_unresolved: e.why_unresolved || "(not specified)",
-      what_would_resolve_it: e.what_would_resolve_it || null,
-      status: "open",
-    })
-    .select()
-    .single();
-
-  if (error) return { outcome: "unresolved_insert_error", error: error.message };
-  return { outcome: "unresolved", id: data.id, what: e.claim_or_concept };
-}
-
-async function applyNotAClaim(e: any, sourceId: string, locator: string) {
-  // We log these for completeness but don't store them in the reasoning graph.
-  // They're part of the source's texture, not Atelier's design understanding.
-  return {
-    outcome: "not_a_claim",
-    kind: e.kind || "unspecified",
-    note: e.brief_note || "",
-  };
-}
-
-// =====================================================
-// GEMINI API CALL
-// =====================================================
-
-async function callGemini(systemPrompt: string, userMessage: string, maxTokens: number, temperature: number) {
-  let accessToken: string;
-  try {
-    accessToken = await getGcpAccessToken();
-  } catch (e) {
-    return { ok: false, error: `GCP auth: ${(e as Error).message}` };
-  }
-
-  const hostname = GCP_REGION === "global"
-    ? "aiplatform.googleapis.com"
-    : `${GCP_REGION}-aiplatform.googleapis.com`;
-  const url = `https://${hostname}/v1/projects/${GCP_PROJECT_ID}/locations/${GCP_REGION}/publishers/google/models/${MODEL}:generateContent`;
-
-  const body = {
-    contents: [{ role: "user", parts: [{ text: userMessage }] }],
-    systemInstruction: { parts: [{ text: systemPrompt }] },
-    generationConfig: {
-      temperature,
-      maxOutputTokens: maxTokens,
-      responseMimeType: "application/json",
-    },
-  };
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    return { ok: false, error: `Gemini API ${response.status}: ${errText}` };
-  }
-
-  const data = await response.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    return { ok: false, error: `Empty Gemini response: ${JSON.stringify(data).slice(0, 300)}` };
-  }
-  return { ok: true, text };
-}
-
-// =====================================================
-// HELPERS
-// =====================================================
-
-function stripCodeFences(text: string) {
-  let cleaned = text.trim();
-  cleaned = cleaned.replace(/^```(?:json|JSON)?\s*\n?/, "");
-  cleaned = cleaned.replace(/\n?\s*```\s*$/, "");
-  const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-  }
-  return cleaned.trim();
-}
-
-function jsonResponse(data: any) {
-  return new Response(JSON.stringify(data), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
-
-function errorResponse(step: string, error: string) {
-  return new Response(JSON.stringify({ success: false, step, error }), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-    status: 500,
-  });
-                                      }
+      return { outcome: "u
