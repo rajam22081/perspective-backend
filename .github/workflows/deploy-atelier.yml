@@ -1,4 +1,4 @@
-name: Deploy Atelier Function
+name: Deploy Atelier Functions
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "supabase/functions/atelier-read-chunk/**"
+      - "supabase/functions/atelier-design-page/**"
       - ".github/workflows/deploy-atelier.yml"
 
 jobs:
@@ -25,3 +26,8 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: supabase functions deploy atelier-read-chunk --project-ref "${{ secrets.SUPABASE_PROJECT_ID }}" --no-verify-jwt
+
+      - name: Deploy atelier-design-page
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy atelier-design-page --project-ref "${{ secrets.SUPABASE_PROJECT_ID }}" --no-verify-jwt
