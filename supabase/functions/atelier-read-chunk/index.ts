@@ -131,6 +131,8 @@ Deno.serve(async (req) => {
     if (action === "create_source") return await createSource(body);
     if (action === "read_chunk") return await readChunk(body);
     if (action === "get_source_summary") return await getSourceSummary(body);
+    if (action === "get_current_understanding") return await getCurrentUnderstanding();
+    if (action === "apply_encounters") return await applyEncounters(body);
     return errorResponse("unknown_action", `Unknown action: ${action}`);
   } catch (e) {
     return errorResponse("unhandled", String((e as Error)?.message || e));
@@ -189,6 +191,43 @@ async function getSourceSummary(body: any) {
     mechanisms_added: mechanisms || [],
     entries_added: entries || [],
     unresolved_encounters: unresolved || [],
+  });
+}
+
+// =====================================================
+// GET CURRENT UNDERSTANDING (exposes the same context the
+// reasoning prompt would receive — for external readers)
+// =====================================================
+
+async function getCurrentUnderstanding() {
+  const understanding = await loadCurrentUnderstanding();
+  return jsonResponse({ success: true, understanding });
+}
+
+// =====================================================
+// APPLY ENCOUNTERS (accepts pre-reasoned encounters in
+// Gemini's output schema and runs them through applyEncounter)
+// =====================================================
+
+async function applyEncounters(body: any) {
+  const { source_id, chunk_locator, page_number, encounters } = body;
+  if (!source_id) return errorResponse("missing_fields", "source_id required");
+  if (!Array.isArray(encounters)) {
+    return errorResponse("missing_fields", "encounters array required");
+  }
+
+  const results = [];
+  for (const item of encounters) {
+    const applied = await applyEncounter(item, source_id, chunk_locator || "");
+    results.push(applied);
+  }
+
+  return jsonResponse({
+    success: true,
+    chunk_locator: chunk_locator || null,
+    page_number: page_number || null,
+    encounters_processed: results.length,
+    results,
   });
 }
 
