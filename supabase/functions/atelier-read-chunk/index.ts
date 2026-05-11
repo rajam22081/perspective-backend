@@ -133,6 +133,8 @@ Deno.serve(async (req) => {
     if (action === "get_source_summary") return await getSourceSummary(body);
     if (action === "get_current_understanding") return await getCurrentUnderstanding();
     if (action === "apply_encounters") return await applyEncounters(body);
+    if (action === "merge_mechanism") return await mergeMechanism(body);
+    if (action === "rename_mechanism") return await renameMechanism(body);
     return errorResponse("unknown_action", `Unknown action: ${action}`);
   } catch (e) {
     return errorResponse("unhandled", String((e as Error)?.message || e));
@@ -229,6 +231,123 @@ async function applyEncounters(body: any) {
     encounters_processed: results.length,
     results,
   });
+}
+
+// =====================================================
+// MERGE MECHANISM (redirects all FKs from duplicate to canonical, then deletes duplicate)
+// Optional `merge_text` object lets the caller patch fields on the canonical
+// row before the duplicate is removed.
+// =====================================================
+
+async function mergeMechanism(body: any) {
+  const { canonical_id, duplicate_id, merge_text } = body;
+  if (!canonical_id || !duplicate_id) {
+    return errorResponse("missing_fields", "canonical_id and duplicate_id required");
+  }
+  if (canonical_id === duplicate_id) {
+    return errorResponse("invalid", "canonical_id and duplicate_id must differ");
+  }
+
+  const { data: canonical } = await supabase
+    .from("mechanisms").select("id, name").eq("id", canonical_id).maybeSingle();
+  const { data: duplicate } = await supabase
+    .from("mechanisms").select("id, name").eq("id", duplicate_id).maybeSingle();
+  if (!canonical) return errorResponse("not_found", `canonical_id ${canonical_id} not found`);
+  if (!duplicate) return errorResponse("not_found", `duplicate_id ${duplicate_id} not found`);
+
+  const stats: Record<string, any> = {
+    canonical: { id: canonical.id, name: canonical.name },
+    duplicate: { id: duplicate.id, name: duplicate.name },
+  };
+
+  // If caller supplied merge_text fields, patch the canonical first (before redirecting).
+  if (merge_text && typeof merge_text === "object") {
+    const allowed = ["description", "what_it_means", "derivation", "boundary", "outside_boundary"];
+    const patch: Record<string, any> = {};
+    for (const k of allowed) {
+      if (typeof merge_text[k] === "string" && merge_text[k].trim()) patch[k] = merge_text[k];
+    }
+    if (Object.keys(patch).length) {
+      await supabase.from("mechanisms").update(patch).eq("id", canonical_id);
+      stats.canonical_patched = Object.keys(patch);
+    }
+  }
+
+  // Redirect each FK table. Strategy: pull duplicate's rows, insert into canonical (skipping
+  // ones the canonical already has), then delete duplicate's rows.
+  async function redirect(table: string, fkCol: string, otherCols: string[]) {
+    const sel = ["id", fkCol, ...otherCols].join(",");
+    const { data: dupRows } = await supabase.from(table).select(sel).eq(fkCol, duplicate_id);
+    if (!dupRows || dupRows.length === 0) {
+      stats[table] = { existed_on_duplicate: 0, redirected: 0 };
+      return;
+    }
+    let redirected = 0;
+    let absorbed = 0;
+    for (const row of dupRows as any[]) {
+      const newRow: Record<string, any> = { [fkCol]: canonical_id };
+      for (const c of otherCols) newRow[c] = row[c];
+      const { error: insErr } = await supabase.from(table).insert(newRow);
+      if (insErr) {
+        // most likely unique-constraint conflict — canonical already has equivalent row. skip.
+        absorbed++;
+      } else {
+        redirected++;
+      }
+    }
+    await supabase.from(table).delete().eq(fkCol, duplicate_id);
+    stats[table] = { existed_on_duplicate: dupRows.length, redirected, absorbed_as_duplicate_edge: absorbed };
+  }
+
+  await redirect("mechanism_cited_in_source", "mechanism_id", ["source_id", "locator", "source_framing"]);
+  await redirect("mechanism_uses_concept", "mechanism_id", ["concept_id"]);
+  await redirect("mechanism_alternatives", "mechanism_id", ["alternative", "comparison", "conditions_for_use"]);
+
+  // mechanism_derives_from_mechanism is a self-join: redirect both directions
+  await redirect("mechanism_derives_from_mechanism", "derived_id", ["source_id"]);
+  await redirect("mechanism_derives_from_mechanism", "source_id", ["derived_id"]);
+
+  // Finally, delete the duplicate mechanism row itself.
+  const { error: delErr } = await supabase.from("mechanisms").delete().eq("id", duplicate_id);
+  if (delErr) {
+    return errorResponse("delete_failed", `redirected FKs ok but failed to delete duplicate row: ${delErr.message}`);
+  }
+  stats.duplicate_deleted = true;
+
+  return jsonResponse({ success: true, ...stats });
+}
+
+// =====================================================
+// RENAME MECHANISM (UPDATE name field; collision-safe)
+// =====================================================
+
+async function renameMechanism(body: any) {
+  const { id, new_name } = body;
+  if (!id || !new_name || typeof new_name !== "string" || !new_name.trim()) {
+    return errorResponse("missing_fields", "id and new_name (non-empty string) required");
+  }
+  const cleanName = new_name.toLowerCase().trim();
+
+  const { data: existing } = await supabase
+    .from("mechanisms").select("id, name").eq("id", id).maybeSingle();
+  if (!existing) return errorResponse("not_found", `id ${id} not found`);
+
+  if (existing.name === cleanName) {
+    return jsonResponse({ success: true, id, old_name: existing.name, new_name: cleanName, no_change: true });
+  }
+
+  // Check for name collision
+  const { data: collision } = await supabase
+    .from("mechanisms").select("id").eq("name", cleanName).maybeSingle();
+  if (collision && collision.id !== id) {
+    return errorResponse("collision",
+      `another mechanism (${collision.id}) already uses name "${cleanName}" — use merge_mechanism instead`);
+  }
+
+  const { error } = await supabase.from("mechanisms").update({ name: cleanName }).eq("id", id);
+  if (error) return errorResponse("update_failed", error.message);
+
+  return jsonResponse({ success: true, id, old_name: existing.name, new_name: cleanName });
 }
 
 // =====================================================
