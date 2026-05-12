@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Atelier — Design Page Generator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #F5F1E8;
+    --bg-warm: #EFE9DA;
+    --ink: #1A1815;
+    --ink-muted: #6B6358;
+    --rule: #C9C0AD;
+    --rule-soft: #DDD4BF;
+    --accent: #8B2615;
+    --accent-soft: #C2613F;
+    --ok: #3E5A2B;
+    --serif: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { font-size: 16px; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-variation-settings: "opsz" 14, "SOFT" 30;
+    line-height: 1.5;
+    min-height: 100vh;
+    padding: 2rem 2.5rem 6rem;
+    background-image:
+      radial-gradient(rgba(26,24,21,0.025) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  @media (max-width: 720px) {
+    body { padding: 1.25rem 1.25rem 4rem; }
+  }
+
+  .frame {
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  /* --- Header --- */
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--ink);
+    margin-bottom: 2.5rem;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+  .wordmark {
+    font-family: var(--serif);
+    font-variation-settings: "opsz" 144, "SOFT" 0, "wght" 350;
+    font-size: clamp(2.5rem, 6vw, 4rem);
+    letter-spacing: -0.02em;
+    font-style: italic;
+    line-height: 0.95;
+  }
+  .wordmark .dot {
+    color: var(--accent);
+    font-style: normal;
+  }
+  .header-meta {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    text-align: right;
+  }
+  .header-meta .line { display: block; }
+  .header-meta .line + .line { margin-top: 0.2rem; }
+
+  /* --- Section markers --- */
+  .section {
+    padding: 2.25rem 0;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .section:last-of-type { border-bottom: none; }
+
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .marker {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    font-weight: 500;
+    flex-shrink: 0;
+    padding-top: 0.4rem;
+  }
+  .section-title {
+    font-family: var(--serif);
+    font-variation-settings: "opsz" 72, "wght" 400;
+    font-size: clamp(1.4rem, 3vw, 1.9rem);
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+  }
+  .section-sub {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    color: var(--ink-muted);
+    text-transform: uppercase;
+    margin-top: 0.3rem;
+  }
+
+  /* --- Brief input --- */
+  .brief-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+  }
+  textarea {
+    width: 100%;
+    min-height: 180px;
+    background: var(--bg-warm);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 1.25rem 1.4rem;
+    font-family: var(--serif);
+    font-size: 1.05rem;
+    line-height: 1.55;
+    color: var(--ink);
+    resize: vertical;
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+  textarea:focus {
+    outline: none;
+    border-color: var(--ink);
+    background: #FBF7EC;
+  }
+  textarea::placeholder {
+    color: var(--ink-muted);
+    font-style: italic;
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  button {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.85rem 1.5rem;
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: var(--bg);
+    cursor: pointer;
+    border-radius: 2px;
+    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+  }
+  button:hover:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  button:disabled {
+    background: transparent;
+    color: var(--ink-muted);
+    border-color: var(--rule);
+    cursor: not-allowed;
+  }
+  button.ghost {
+    background: transparent;
+    color: var(--ink);
+  }
+  button.ghost:hover:not(:disabled) {
+    background: var(--ink);
+    color: var(--bg);
+    border-color: var(--ink);
+  }
+
+  .hint {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--ink-muted);
+    letter-spacing: 0.05em;
+  }
+
+  /* --- Status / output --- */
+  #status-section { display: none; }
+  #status-section.active { display: block; }
+
+  .status-block {
+    background: var(--bg-warm);
+    border: 1px solid var(--rule);
+    padding: 1.5rem 1.75rem;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 1.5rem;
+  }
+  @media (max-width: 560px) {
+    .status-block { grid-template-columns: 1fr; }
+  }
+  .status-text {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+  .status-text .dot-anim::after {
+    content: "";
+    display: inline-block;
+    width: 2.5em;
+    text-align: left;
+    animation: dots 1.4s steps(4, end) infinite;
+  }
+  @keyframes dots {
+    0% { content: ""; }
+    25% { content: "."; }
+    50% { content: ".."; }
+    75% { content: "..."; }
+  }
+  .timer {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 2.2rem;
+    font-weight: 300;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  .timer small {
+    font-size: 0.7rem;
+    color: var(--ink-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-left: 0.4rem;
+  }
+
+  .status-block.error {
+    border-color: var(--accent);
+    background: #F8E8E3;
+  }
+  .status-block.error .status-text { color: var(--accent); }
+  .status-block.error .timer { color: var(--accent); }
+
+  .status-block.success { border-color: var(--ok); }
+  .status-block.success .timer { color: var(--ok); }
+
+  /* --- Output --- */
+  #output-wrap { display: none; margin-top: 1.75rem; }
+  #output-wrap.active { display: block; }
+
+  .output-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-bottom: 0.9rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .output-label {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+  }
+  .output-actions {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .output-actions button {
+    padding: 0.55rem 1rem;
+    font-size: 0.7rem;
+  }
+
+  iframe#preview {
+    width: 100%;
+    height: 70vh;
+    min-height: 480px;
+    border: 1px solid var(--rule);
+    background: white;
+    border-radius: 2px;
+  }
+
+  /* --- History --- */
+  .history-list {
+    list-style: none;
+    margin-top: 0.5rem;
+  }
+  .history-empty {
+    font-family: var(--serif);
+    font-style: italic;
+    color: var(--ink-muted);
+    font-size: 1rem;
+    padding: 1rem 0;
+  }
+  .history-item {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 1.25rem;
+    align-items: baseline;
+    padding: 1rem 0;
+    border-top: 1px solid var(--rule-soft);
+    cursor: pointer;
+    transition: background 0.15s ease, padding-left 0.15s ease;
+  }
+  .history-item:hover {
+    padding-left: 0.5rem;
+  }
+  .history-item:first-child { border-top: none; }
+
+  .history-index {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    min-width: 2.5ch;
+  }
+  .history-brief {
+    font-family: var(--serif);
+    font-size: 1rem;
+    line-height: 1.4;
+    color: var(--ink);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .history-time {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--ink-muted);
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+    text-align: right;
+  }
+  @media (max-width: 560px) {
+    .history-item { grid-template-columns: auto 1fr; }
+    .history-time { grid-column: 2; text-align: left; margin-top: 0.2rem; }
+  }
+  .history-controls {
+    margin-top: 1rem;
+    display: flex;
+    justify-content: flex-end;
+  }
+  .clear-btn {
+    background: transparent;
+    color: var(--ink-muted);
+    border-color: var(--rule);
+    font-size: 0.68rem;
+    padding: 0.5rem 0.9rem;
+  }
+  .clear-btn:hover:not(:disabled) {
+    background: transparent;
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  /* --- Footer --- */
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--ink);
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 1rem;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    color: var(--ink-muted);
+    text-transform: uppercase;
+  }
+  footer em {
+    font-family: var(--serif);
+    font-style: italic;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ink);
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <header>
+    <h1 class="wordmark">Atelier<span class="dot">.</span></h1>
+    <div class="header-meta">
+      <span class="line">Design Page Generator</span>
+      <span class="line" id="graph-stat">Graph · 812 mechanisms</span>
+    </div>
+  </header>
+
+  <!-- 01 — BRIEF -->
+  <section class="section">
+    <div class="section-head">
+      <span class="marker">01</span>
+      <div>
+        <h2 class="section-title">The brief</h2>
+        <p class="section-sub">Describe the studio, voice, audience, and any references</p>
+      </div>
+    </div>
+
+    <div class="brief-grid">
+      <textarea
+        id="brief"
+        placeholder="A single-origin coffee bar in Bangalore. Quiet, considered, for the regular customer. The owner roasts on Sundays. The space is small and warm. Editorial, not corporate. Mention the hand-printed menu."
+      ></textarea>
+
+      <div class="actions">
+        <button id="generate-btn">Generate page</button>
+        <span class="hint">Typically 60–180 seconds</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 — STATUS + OUTPUT -->
+  <section class="section" id="status-section">
+    <div class="section-head">
+      <span class="marker">02</span>
+      <div>
+        <h2 class="section-title" id="output-heading">Working</h2>
+        <p class="section-sub" id="output-sub">Atelier is reasoning through the brief</p>
+      </div>
+    </div>
+
+    <div class="status-block" id="status-block">
+      <div class="status-text" id="status-text">
+        <span id="status-label">Dispatching to atelier</span><span class="dot-anim"></span>
+      </div>
+      <div class="timer">
+        <span id="timer">0</span><small>s</small>
+      </div>
+    </div>
+
+    <div id="output-wrap">
+      <div class="output-bar">
+        <span class="output-label">Preview</span>
+        <div class="output-actions">
+          <button class="ghost" id="download-html">Download HTML</button>
+          <button class="ghost" id="download-meta">Download meta</button>
+          <button class="ghost" id="open-new">Open in tab</button>
+        </div>
+      </div>
+      <iframe id="preview" title="Generated page preview"></iframe>
+    </div>
+  </section>
+
+  <!-- 03 — HISTORY -->
+  <section class="section">
+    <div class="section-head">
+      <span class="marker">03</span>
+      <div>
+        <h2 class="section-title">History</h2>
+        <p class="section-sub" id="history-sub">Stored locally · click any item to reopen</p>
+      </div>
+    </div>
+    <ul class="history-list" id="history-list">
+      <li class="history-empty">Nothing yet. Generate something above.</li>
+    </ul>
+    <div class="history-controls">
+      <button class="clear-btn" id="clear-history">Clear history</button>
+    </div>
+  </section>
+
+  <footer>
+    <span><em>Atelier</em> — graph-grounded design</span>
+    <span id="footer-stat">Local cache · <span id="cache-count">0</span> pages</span>
+  </footer>
+</div>
+
+<script>
+  // ─── CONFIG ──────────────────────────────────────────────────────────────
+  // The anon key is the PUBLIC Supabase key — safe to embed in client code.
+  // Paste your full anon key here (the one starting with eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...):
+  const SUPABASE_URL = "https://kzxmlbcjbgltdrvbbsra.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6eG1sYmNqYmdsdGRydmJic3JhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwMDk5NDAsImV4cCI6MjA5MjU4NTk0MH0.CNaAhJYYK-HISWVvYIF5rgwgwMkV5W0TdgRBMhv0Vno";
+  const FUNCTION_PATH = "/functions/v1/atelier-design-page";
+
+  const LS_KEY = "atelier.history.v1";
+  const MAX_HISTORY = 30;
+
+  // ─── ELEMENTS ────────────────────────────────────────────────────────────
+  const $ = (id) => document.getElementById(id);
+  const briefEl = $("brief");
+  const genBtn = $("generate-btn");
+  const statusSection = $("status-section");
+  const statusBlock = $("status-block");
+  const statusLabel = $("status-label");
+  const statusText = $("status-text");
+  const outputHeading = $("output-heading");
+  const outputSub = $("output-sub");
+  const timerEl = $("timer");
+  const outputWrap = $("output-wrap");
+  const previewFrame = $("preview");
+  const dlHtmlBtn = $("download-html");
+  const dlMetaBtn = $("download-meta");
+  const openNewBtn = $("open-new");
+  const historyList = $("history-list");
+  const clearBtn = $("clear-history");
+  const cacheCount = $("cache-count");
+
+  // ─── STATE ───────────────────────────────────────────────────────────────
+  let currentResult = null;     // { html, meta, brief, ts }
+  let timerInterval = null;
+  let timerStart = null;
+
+  // ─── HISTORY ─────────────────────────────────────────────────────────────
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveHistory(items) {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(items.slice(0, MAX_HISTORY)));
+    } catch (e) {
+      console.warn("History save failed:", e);
+    }
+  }
+  function addToHistory(item) {
+    const items = loadHistory();
+    items.unshift(item);
+    saveHistory(items);
+    renderHistory();
+  }
+  function formatTime(ts) {
+    const d = new Date(ts);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const opts = sameDay
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+    return d.toLocaleString(undefined, opts);
+  }
+  function renderHistory() {
+    const items = loadHistory();
+    cacheCount.textContent = items.length;
+    if (items.length === 0) {
+      historyList.innerHTML = '<li class="history-empty">Nothing yet. Generate something above.</li>';
+      return;
+    }
+    historyList.innerHTML = items
+      .map((it, i) => {
+        const num = String(i + 1).padStart(2, "0");
+        const brief = (it.brief || "").trim().slice(0, 220).replace(/</g, "&lt;");
+        return `
+          <li class="history-item" data-idx="${i}">
+            <span class="history-index">${num}</span>
+            <span class="history-brief">${brief || "(empty brief)"}</span>
+            <span class="history-time">${formatTime(it.ts)}</span>
+          </li>`;
+      })
+      .join("");
+    historyList.querySelectorAll(".history-item").forEach((el) => {
+      el.addEventListener("click", () => {
+        const idx = parseInt(el.dataset.idx, 10);
+        const items = loadHistory();
+        const item = items[idx];
+        if (item) showResult(item, /*fromHistory*/ true);
+      });
+    });
+  }
+
+  // ─── TIMER ───────────────────────────────────────────────────────────────
+  function startTimer() {
+    timerStart = Date.now();
+    timerEl.textContent = "0";
+    timerInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - timerStart) / 1000);
+      timerEl.textContent = String(elapsed);
+      // soft status updates as we cross thresholds
+      if (elapsed === 20) statusLabel.textContent = "Reading the graph";
+      else if (elapsed === 60) statusLabel.textContent = "Composing the page";
+      else if (elapsed === 120) statusLabel.textContent = "Almost there";
+      else if (elapsed === 200) statusLabel.textContent = "Still working — long brief";
+    }, 1000);
+  }
+  function stopTimer() {
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = null;
+  }
+
+  // ─── GENERATION ──────────────────────────────────────────────────────────
+  async function generate() {
+    const brief = briefEl.value.trim();
+    if (!brief) {
+      briefEl.focus();
+      return;
+    }
+    if (SUPABASE_ANON_KEY === "PASTE_YOUR_ANON_KEY_HERE") {
+      alert("Paste your Supabase anon key into SUPABASE_ANON_KEY at the top of the script.");
+      return;
+    }
+
+    // UI: enter loading state
+    genBtn.disabled = true;
+    statusSection.classList.add("active");
+    statusBlock.className = "status-block";
+    outputWrap.classList.remove("active");
+    statusText.innerHTML = '<span id="status-label">Dispatching to atelier</span><span class="dot-anim"></span>';
+    // re-bind because innerHTML rewrote the element
+    const newLabel = document.getElementById("status-label");
+    outputHeading.textContent = "Working";
+    outputSub.textContent = "Atelier is reasoning through the brief";
+    startTimer();
+
+    try {
+      const res = await fetch(SUPABASE_URL + FUNCTION_PATH, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+          "apikey": SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ brief }),
+      });
+
+      const elapsed = Math.floor((Date.now() - timerStart) / 1000);
+      stopTimer();
+
+      if (!res.ok) {
+        let detail = "";
+        try { detail = await res.text(); } catch {}
+        throw new Error(`HTTP ${res.status}${detail ? ": " + detail.slice(0, 300) : ""}`);
+      }
+
+      // Try to parse JSON; if function returned raw HTML, handle that too.
+      const contentType = res.headers.get("content-type") || "";
+      let payload, html, meta;
+
+      if (contentType.includes("application/json")) {
+        payload = await res.json();
+        html = payload.html || payload.page || payload.content || "";
+        meta = payload.meta || payload.metadata || { ...payload };
+        if (meta && meta.html) delete meta.html;
+      } else {
+        html = await res.text();
+        meta = { note: "Function returned non-JSON; raw body stored as html.", elapsed_seconds: elapsed };
+      }
+
+      if (!html) {
+        throw new Error("Response contained no html field. Payload: " + JSON.stringify(payload).slice(0, 300));
+      }
+
+      const result = {
+        brief,
+        html,
+        meta,
+        ts: Date.now(),
+        elapsed_seconds: elapsed,
+      };
+
+      currentResult = result;
+      addToHistory(result);
+      showResult(result);
+
+      statusBlock.className = "status-block success";
+      outputHeading.textContent = "Page ready";
+      outputSub.textContent = `Generated in ${elapsed} seconds`;
+      statusText.innerHTML = '<span>Complete</span>';
+    } catch (err) {
+      stopTimer();
+      statusBlock.className = "status-block error";
+      outputHeading.textContent = "Generation failed";
+      outputSub.textContent = "Something went wrong — see details below";
+      statusText.textContent = String(err.message || err);
+      console.error(err);
+    } finally {
+      genBtn.disabled = false;
+    }
+  }
+
+  function showResult(result, fromHistory = false) {
+    currentResult = result;
+    statusSection.classList.add("active");
+    outputWrap.classList.add("active");
+    previewFrame.srcdoc = result.html;
+
+    if (fromHistory) {
+      stopTimer();
+      statusBlock.className = "status-block success";
+      timerEl.textContent = String(result.elapsed_seconds || 0);
+      outputHeading.textContent = "From history";
+      outputSub.textContent = formatTime(result.ts);
+      statusText.innerHTML = '<span>Loaded from local cache</span>';
+      briefEl.value = result.brief || "";
+      window.scrollTo({ top: statusSection.offsetTop - 20, behavior: "smooth" });
+    }
+  }
+
+  // ─── DOWNLOADS ───────────────────────────────────────────────────────────
+  function download(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 500);
+  }
+  function slugify(s) {
+    return (s || "page")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "page";
+  }
+  function downloadHtml() {
+    if (!currentResult) return;
+    const slug = slugify(currentResult.brief);
+    download(`atelier-${slug}.html`, currentResult.html, "text/html");
+  }
+  function downloadMeta() {
+    if (!currentResult) return;
+    const slug = slugify(currentResult.brief);
+    const meta = {
+      brief: currentResult.brief,
+      generated_at: new Date(currentResult.ts).toISOString(),
+      elapsed_seconds: currentResult.elapsed_seconds,
+      meta: currentResult.meta || {},
+    };
+    download(`atelier-${slug}.meta.json`, JSON.stringify(meta, null, 2), "application/json");
+  }
+  function openInNewTab() {
+    if (!currentResult) return;
+    const blob = new Blob([currentResult.html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  // ─── WIRING ──────────────────────────────────────────────────────────────
+  genBtn.addEventListener("click", generate);
+  briefEl.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") generate();
+  });
+  dlHtmlBtn.addEventListener("click", downloadHtml);
+  dlMetaBtn.addEventListener("click", downloadMeta);
+  openNewBtn.addEventListener("click", openInNewTab);
+  clearBtn.addEventListener("click", () => {
+    if (confirm("Clear all local history? This can't be undone.")) {
+      localStorage.removeItem(LS_KEY);
+      renderHistory();
+    }
+  });
+
+  // initial render
+  renderHistory();
+</script>
+</body>
+</html>
