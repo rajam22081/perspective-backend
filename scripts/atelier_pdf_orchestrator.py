@@ -23,7 +23,7 @@ Optional flags:
     --end-page 0              Stop at this page (0 = read to end)
     --image-dpi 110           Image render DPI (lower = smaller, faster)
     --pause-after 5           Pause briefly after every N pages
-    --pause-seconds 3         How long to pause
+    --pause-seconds 15        How long to pause
     --skip-pages 1,2,3        Pages to skip entirely (comma-separated)
     --resume-source <id>      Continue an existing source instead of creating new
 
@@ -129,10 +129,21 @@ def create_source(kind: str, title: str, author: Optional[str], reference: Optio
     return data["source"]["id"]
 
 
+RETRY_BACKOFFS = [30, 60, 120, 240, 480]
+
+
+def _is_rate_limited(status_code: int, body: str) -> bool:
+    if status_code == 429:
+        return True
+    if body and "RESOURCE_EXHAUSTED" in body:
+        return True
+    return False
+
+
 def read_chunk(source_id: str, chunk_text: str, page_image_b64: str,
                page_number: int, chunk_locator: str,
                timeout: int = 240) -> dict:
-    """Send one page (text + image) to Atelier."""
+    """Send one page (text + image) to Atelier, retrying on rate limits / network errors."""
     payload = {
         "action": "read_chunk",
         "source_id": source_id,
@@ -141,10 +152,29 @@ def read_chunk(source_id: str, chunk_text: str, page_image_b64: str,
         "page_number": page_number,
         "chunk_locator": chunk_locator,
     }
-    r = requests.post(ENDPOINT, headers=HEADERS, json=payload, timeout=timeout)
-    if not r.ok:
-        return {"success": False, "status_code": r.status_code, "body": r.text[:1000]}
-    return r.json()
+
+    last_result = None
+    for attempt in range(len(RETRY_BACKOFFS) + 1):
+        try:
+            r = requests.post(ENDPOINT, headers=HEADERS, json=payload, timeout=timeout)
+            if r.ok:
+                return r.json()
+            body = r.text[:1000]
+            last_result = {"success": False, "status_code": r.status_code, "body": body}
+            if not _is_rate_limited(r.status_code, body):
+                return last_result
+            transient_msg = f"HTTP {r.status_code} (rate limited)"
+        except requests.exceptions.RequestException as e:
+            last_result = {"success": False, "error": f"RequestException: {e}"}
+            transient_msg = f"network error: {e}"
+
+        if attempt >= len(RETRY_BACKOFFS):
+            break
+        wait = RETRY_BACKOFFS[attempt]
+        print(f"      ... {transient_msg}; retry {attempt + 1}/{len(RETRY_BACKOFFS)} in {wait}s")
+        time.sleep(wait)
+
+    return last_result or {"success": False, "error": "unknown failure"}
 
 
 # --------------------------------------------------------
@@ -169,7 +199,7 @@ def main():
     parser.add_argument("--image-dpi", type=int, default=110)
     parser.add_argument("--max-image-dimension", type=int, default=2000)
     parser.add_argument("--pause-after", type=int, default=5, help="Pause after every N pages")
-    parser.add_argument("--pause-seconds", type=int, default=3)
+    parser.add_argument("--pause-seconds", type=int, default=15)
     parser.add_argument("--skip-pages", default="", help="Comma-separated list of 1-indexed pages to skip")
     parser.add_argument("--resume-source", default=None, help="Continue an existing source by id")
     parser.add_argument("--save-progress", default=None,
